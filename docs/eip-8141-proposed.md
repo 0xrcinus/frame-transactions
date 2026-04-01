@@ -50,7 +50,7 @@ The payload is defined as the RLP serialization of the following:
 ```
 [chain_id, nonce, sender, frames, max_priority_fee_per_gas, max_fee_per_gas, max_fee_per_blob_gas, blob_versioned_hashes]
 
-frames = [[mode, target, value, data, gas_limit], ...]
+frames = [[mode, target, gas_limit, value, data], ...]
 ```
 
 If no blobs are included, `blob_versioned_hashes` must be an empty list and `max_fee_per_blob_gas` must be `0`.
@@ -63,9 +63,9 @@ Each frame has five fields:
 |-----------|------------------|-------------|
 | `mode`      | uint16           | Execution mode (bit 0) and group ID (bits 8-15) |
 | `target`    | address or null  | Target address. Null defaults to `tx.sender` |
+| `gas_limit` | uint64           | Gas allocated to this frame |
 | `value`     | uint256          | ETH value to forward with the call |
 | `data`      | bytes            | Calldata |
-| `gas_limit` | uint64           | Gas allocated to this frame |
 
 #### Frame Modes
 
@@ -187,12 +187,11 @@ The behavior of `APPROVE` depends on the caller's identity:
     - If `sender_approved` was already set, revert the frame.
     - Set `payer = tx.sender`.
 - If `ADDRESS != tx.sender`:
-    - If `sender_approved == false`, revert the frame.
     - Set `payer = ADDRESS`.
 
-Subsequent APPROVE calls from non-sender addresses overwrite `payer`. This allows the last VERIFY frame to determine who pays for gas.
+Subsequent APPROVE calls from non-sender addresses overwrite `payer`. This allows the last VERIFY frame to determine who pays for gas. A non-sender may call APPROVE before or after the sender — the ordering is not constrained. The protocol only requires that both `sender_approved == true` and `payer` has sufficient balance after all VERIFY frames complete.
 
-After the last VERIFY frame in the transaction completes, the protocol increments the sender's nonce and collects the total gas cost from `payer`. If `payer` has insufficient balance, the transaction is invalid.
+After the last VERIFY frame in the transaction completes, the protocol verifies that `sender_approved == true`, increments the sender's nonce, and collects the total gas cost from `payer`. If `sender_approved` is false or `payer` has insufficient balance, the transaction is invalid.
 
 #### `TXPARAM` opcode
 
@@ -268,7 +267,7 @@ Initialize with transaction-scoped variables:
 
 Then for each call frame:
 
-2. Execute a call with the specified `mode`, `target`, `value`, `data`, and `gas_limit`.
+2. Execute a call with the specified `mode`, `target`, `gas_limit`, `value`, and `data`.
    - If `target` is null, set the call target to `tx.sender`.
    - If mode is `EXECUTE` and `sender_approved == true`:
        - Set `caller` as `tx.sender`.
@@ -326,7 +325,7 @@ After executing all frames, verify that `sender_approved == true` and `payer` ha
 
 Note:
 
-- It is implied by the handling that the sender must approve the transaction *before* a non-sender payer can approve, and that once `sender_approved` becomes `true` it cannot be reverted.
+- The sender and payer may approve in any order. Both `sender_approved == true` and a valid `payer` are required after all VERIFY frames complete, but neither is required before the other. Once `sender_approved` becomes `true` it cannot be reverted.
 
 #### Default code
 
@@ -793,14 +792,14 @@ Frame 0 verifies the signature and calls `APPROVE`. Frames 1 and 2 are in group 
 | Frames wrapper                    | 1     |
 | Sender validation frame: mode     | 1     |
 | Sender validation frame: target   | 1     |
+| Sender validation frame: gas      | 2     |
 | Sender validation frame: value    | 1     |
 | Sender validation frame: data     | 65    |
-| Sender validation frame: gas      | 2     |
 | Execution frame: mode             | 1     |
 | Execution frame: target           | 20    |
+| Execution frame: gas              | 1     |
 | Execution frame: value            | 5     |
 | Execution frame: data             | 0     |
-| Execution frame: gas              | 1     |
 | **Total**                         | 134   |
 
 Notes: Nonce assumes < 65536 prior sends. Fees assume < 1099 gwei. Validation frame target is 1 byte because target is `tx.sender`. Validation frame value is 1 byte (0). Validation gas assumes <= 65,536 gas. Validation data is 65 bytes for ECDSA signature. Execution frame target is full 20-byte address. Execution frame value is 5 bytes for ETH amount. Blob fields assume no blobs (empty list, zero max fee).
@@ -813,9 +812,9 @@ The value field adds 1 byte per frame for zero-value calls (the common case — 
 | -------------------------- | ----- |
 | Deployment frame: mode     | 1     |
 | Deployment frame: target   | 20    |
+| Deployment frame: gas      | 3     |
 | Deployment frame: value    | 1     |
 | Deployment frame: data     | 100   |
-| Deployment frame: gas      | 3     |
 | **Total additional**       | 125   |
 
 Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0).
@@ -826,19 +825,19 @@ Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0
 | ------------------------------------ | ----- |
 | Sponsor validation frame: mode     | 1     |
 | Sponsor validation frame: target   | 20    |
+| Sponsor validation frame: gas      | 3     |
 | Sponsor validation frame: value    | 1     |
 | Sponsor validation frame: calldata | 0     |
-| Sponsor validation frame: gas      | 3     |
 | Send to sponsor frame: mode        | 1     |
 | Send to sponsor frame: target      | 20    |
+| Send to sponsor frame: gas         | 3     |
 | Send to sponsor frame: value       | 1     |
 | Send to sponsor frame: calldata    | 68    |
-| Send to sponsor frame: gas         | 3     |
 | Sponsor post op frame: mode        | 2     |
 | Sponsor post op frame: target      | 20    |
+| Sponsor post op frame: gas         | 3     |
 | Sponsor post op frame: value       | 1     |
 | Sponsor post op frame: calldata    | 0     |
-| Sponsor post op frame: gas         | 3     |
 | **Total additional**               | 145   |
 
 Notes: Sponsor can read info from other fields. ERC-20 transfer call is 68 bytes.
