@@ -104,7 +104,7 @@ The upper bits (> 0) of `mode` configure the execution environment.
 | 1-7       | Reserved         | Must be zero  |
 | 8-15      | Group ID         | EXECUTE mode  |
 
-Group IDs are used for atomic batching (see below). A group ID of 0 means the frame is independent (not part of an atomic group).
+Group IDs are used for atomic batching (see below). All EXECUTE frames with the same group ID are atomic — they execute or revert together.
 
 #### Constraints
 
@@ -129,13 +129,6 @@ for frame in tx.frames:
     group_id = (frame.mode >> 8) & 0xFF
     if group_id != 0:
         assert (frame.mode & 0x1) == 1  # must be EXECUTE
-
-# Non-zero group IDs must appear on at least two EXECUTE frames
-from collections import Counter
-group_counts = Counter((f.mode >> 8) & 0xFF for f in tx.frames if (f.mode & 0x1) == 1)
-for group_id, count in group_counts.items():
-    if group_id != 0:
-        assert count >= 2
 ```
 
 #### Receipt
@@ -187,11 +180,12 @@ The behavior of `APPROVE` depends on the caller's identity:
     - If `sender_approved` was already set, revert the frame.
     - Set `payer = tx.sender`.
 - If `ADDRESS != tx.sender`:
+    - If `sender_approved == false`, revert the frame.
     - Set `payer = ADDRESS`.
 
-Subsequent APPROVE calls from non-sender addresses overwrite `payer`. This allows the last VERIFY frame to determine who pays for gas. A non-sender may call APPROVE before or after the sender — the ordering is not constrained. The protocol only requires that both `sender_approved == true` and `payer` has sufficient balance after all VERIFY frames complete.
+The sender must approve before any non-sender payer. This is a data flow requirement: the sender's APPROVE sets `payer = tx.sender` as a default, and a subsequent payer APPROVE overwrites it. If the payer approved first, the sender would overwrite the payer. Subsequent APPROVE calls from non-sender addresses overwrite `payer`, so the last non-sender VERIFY frame determines who pays for gas.
 
-After the last VERIFY frame in the transaction completes, the protocol verifies that `sender_approved == true`, increments the sender's nonce, and collects the total gas cost from `payer`. If `sender_approved` is false or `payer` has insufficient balance, the transaction is invalid.
+After the last VERIFY frame in the transaction completes, the protocol increments the sender's nonce and collects the total gas cost from `payer`. If `payer` has insufficient balance, the transaction is invalid.
 
 #### `TXPARAM` opcode
 
@@ -297,19 +291,19 @@ More precisely, execution of an atomic group proceeds as follows:
    - Restore the state to the snapshot taken before the group.
    - Mark all remaining frames in the group as skipped.
 
-Frames with group ID 0 are independent — they execute and revert individually.
+Group 0 is not special — it is atomic like any other group. Frames that should be independent must use distinct group IDs.
 
 For example, given frames:
 
 | Frame | Mode    | Group ID |
 |-------|---------|----------|
-| 0     | EXECUTE | 1        |
-| 1     | EXECUTE | 1        |
-| 2     | EXECUTE | 2        |
-| 3     | EXECUTE | 2        |
-| 4     | EXECUTE | 0        |
+| 0     | EXECUTE | 0        |
+| 1     | EXECUTE | 0        |
+| 2     | EXECUTE | 1        |
+| 3     | EXECUTE | 1        |
+| 4     | EXECUTE | 2        |
 
-Frames 0-1 form one atomic group and frames 2-3 form another. Frame 4 is independent. If frame 3 reverts, the state changes from frames 2 and 3 are discarded. Frames 0-1 and frame 4 are unaffected.
+All frames in group 0 (frames 0-1) are atomic. All frames in group 1 (frames 2-3) are atomic. Frame 4 is in group 2 alone, so it reverts independently. If frame 3 reverts, frames 2 and 3 are discarded. Groups 0 and 2 are unaffected.
 
 Unlike the atomic batch flag approach, groups need not be contiguous:
 
@@ -325,7 +319,7 @@ After executing all frames, verify that `sender_approved == true` and `payer` ha
 
 Note:
 
-- The sender and payer may approve in any order. Both `sender_approved == true` and a valid `payer` are required after all VERIFY frames complete, but neither is required before the other. Once `sender_approved` becomes `true` it cannot be reverted.
+- The sender must approve before any non-sender payer, because the sender's APPROVE sets `payer = tx.sender` which would overwrite any earlier payer. Once `sender_approved` becomes `true` it cannot be reverted.
 
 #### Default code
 
