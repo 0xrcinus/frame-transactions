@@ -1,0 +1,29 @@
+{
+    "name": "frame-transactions",
+    "version": "0.0.1",
+    "private": true,
+    "description": "Frame Transactions (EIP-8141) — SDK and tools",
+    "license": "MIT",
+    "author": "Wonderland",
+    "type": "module",
+    "scripts": {
+        "build": "turbo run build",
+        "check-types": "turbo run check-types",
+        "clean": "turbo run clean",
+        "format": "turbo run format",
+        "format:fix": "turbo run format:fix",
+        "lint": "turbo run lint",
+        "lint:fix": "turbo run lint:fix",
+        "test": "turbo run test",
+        "test:cov": "turbo run test:cov"
+    },
+    "devDependencies": {
+        "@types/node": "22.13.14",
+        "@vitest/coverage-v8": "4.0.16",
+        "prettier": "3.3.3",
+        "turbo": "2.6.1",
+        "typescript": "5.5.4",
+        "vitest": "4.0.16"
+    },
+    "packageManager": "pnpm@10.24.0"
+}
