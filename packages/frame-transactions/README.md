@@ -12,20 +12,32 @@ pnpm add @wonderland/frame-transactions
 
 ## Quick Start
 
-### App Developer: Send calls as a frame transaction
+### EOA: Send ETH via the viem decorator
 
 ```typescript
-import { createWalletClient, http } from "viem";
-import { mainnet } from "viem/chains";
+import { createWalletClient, createPublicClient, http, parseEther, parseGwei } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { frameActions } from "@wonderland/frame-transactions";
 
-const client = createWalletClient({
-    chain: mainnet,
-    transport: http(),
-    account,
-}).extend(frameActions());
+const account = privateKeyToAccount(PRIVATE_KEY);
 
-// Self-pay: wallet handles VERIFY frames automatically
+const client = createWalletClient({ chain, transport: http(RPC_URL), account })
+    .extend(frameActions());
+
+const hash = await client.sendFrameTransaction({
+    calls: [{ target: recipient, value: parseEther("0.001"), data: "0x", gasLimit: 100_000n }],
+    maxPriorityFeePerGas: parseGwei("1"),
+    maxFeePerGas: parseGwei("3"),
+    accountType: "eoa",
+});
+```
+
+### Smart Account: Send calls as a frame transaction
+
+```typescript
+const client = createWalletClient({ chain, transport: http(), account })
+    .extend(frameActions());
+
 const hash = await client.sendFrameTransaction({
     calls: [
         { target: erc20, data: approveCalldata, gasLimit: 50000n, atomicBatch: true },
@@ -36,11 +48,9 @@ const hash = await client.sendFrameTransaction({
 });
 ```
 
-### App Developer: Sponsored transaction (with paymaster)
+### Sponsored transaction (with paymaster)
 
 ```typescript
-import { frameActions } from "@wonderland/frame-transactions";
-
 const client = createWalletClient({ ... }).extend(frameActions());
 
 // 1. Prepare: resolves chainId, sender, nonce from client automatically
@@ -49,6 +59,7 @@ const prepared = await client.prepareFrameTransaction({
     paymaster: sponsorAddr,
     maxPriorityFeePerGas: 1000000000n,
     maxFeePerGas: 2000000000n,
+    accountType: "eoa", // or omit for smart account
 });
 
 // 2. Get paymaster to sign the sig hash
@@ -58,6 +69,7 @@ const payerSignature = await paymaster.sign(prepared.sigHash);
 const hash = await client.sendPreparedFrameTransaction({
     ...prepared,
     payerVerifyData: payerSignature,
+    accountType: "eoa",
 });
 ```
 
@@ -67,66 +79,49 @@ const hash = await client.sendPreparedFrameTransaction({
 import {
     buildFrameTransaction,
     computeFrameSigHash,
-    insertVerifyData,
     serializeFrameTransaction,
+    computeTxHash,
+    signEoaVerifyFrame,   // for EOAs
+    insertVerifyData,      // for smart accounts
 } from "@wonderland/frame-transactions";
 
-// 1. Build: auto-generates VERIFY prefix from SENDER calls
+// 1. Build: auto-generates VERIFY prefix from calls
 const frameTx = buildFrameTransaction({
-    chainId: 1n,
-    nonce: 0n,
-    sender: senderAddr,
+    chainId: 1n, nonce: 0n, sender: senderAddr,
     calls: [
-        { target: erc20, data: approveCalldata, gasLimit: 50000n, atomicBatch: true },
-        { target: dex, data: swapCalldata, gasLimit: 200000n },
+        { target: recipient, value: parseEther("1"), data: "0x", gasLimit: 100_000n },
     ],
+    accountType: "eoa", // or "smart-account" (default)
     maxPriorityFeePerGas: 1000000000n,
     maxFeePerGas: 2000000000n,
 });
 
-// 2. Compute sig hash (VERIFY frame data is elided)
-const sigHash = computeFrameSigHash(frameTx);
+// 2. Sign — EOA (raw ECDSA) or smart account (pluggable)
+const signedTx = await signEoaVerifyFrame(frameTx, privateKey);
+// OR for smart accounts:
+// const sigHash = computeFrameSigHash(frameTx);
+// const sig = await signer.sign(sigHash);
+// const signedTx = insertVerifyData(frameTx, { frameIndex: 0, data: sig });
 
-// 3. Sign externally (pluggable — ECDSA, P256, smart account, etc.)
-const signature = await signer.sign(sigHash);
-
-// 4. Insert signature into VERIFY frame
-const signedTx = insertVerifyData(frameTx, { frameIndex: 0, data: signature });
-
-// 5. Serialize as type 0x06
+// 3. Serialize as type 0x06
 const serialized = serializeFrameTransaction(signedTx);
 
-// 6. Submit
-await client.sendRawTransaction({ serializedTransaction: serialized });
+// 4. Compute tx hash
+const txHash = computeTxHash(signedTx);
 ```
 
-## EIP-8141 Background
+## Account Types
 
-A frame transaction contains an ordered array of frames, each with a `mode`, `target`, `gas_limit`, and `data`:
+The SDK supports both EOA and smart account patterns via the `accountType` parameter:
 
-| Mode | Purpose |
-|------|---------|
-| `DEFAULT` | Execute as `ENTRY_POINT` (e.g. deploy account) |
-| `VERIFY` | Validation frame — must call `APPROVE` (signature lives here) |
-| `SENDER` | Execute on behalf of sender (the actual user calls) |
+| | `accountType: "smart-account"` (default) | `accountType: "eoa"` |
+|---|---|---|
+| SENDER frame target | `call.target` | `null` (triggers default code) |
+| SENDER frame data | `call.data` (calldata) | RLP-encoded `[[target, value, data]]` |
+| Signing | `signMessage` (EIP-191) | Raw ECDSA via `signEoaVerifyFrame` |
+| VERIFY data format | Contract-defined | `0x00 + v + r + s` (66 bytes) |
 
-### Approval flow
-
-Approval is two-phase: `sender_approved` must be set before `payer_approved`.
-
-- **Self-pay**: single VERIFY frame calls `APPROVE(0x3)` — approves both sender and payer
-- **Sponsored**: VERIFY frame calls `APPROVE(0x1)` for sender, separate VERIFY frame calls `APPROVE(0x2)` for paymaster
-
-### Validation prefixes (mempool-recognized)
-
-| Pattern | Frame ordering |
-|---------|---------------|
-| Self-relay | `verify(scope=0x3)` → sender frames |
-| Self-relay + deploy | `deploy` → `verify(scope=0x3)` → sender frames |
-| Paymaster | `verify(scope=0x1)` → `pay(scope=0x2)` → sender frames |
-| Paymaster + deploy | `deploy` → `verify(scope=0x1)` → `pay(scope=0x2)` → sender frames |
-
-`buildFrameTransaction` automatically generates the correct validation prefix based on whether a `paymaster` and/or `deploy` option is provided.
+The viem decorator (`sendFrameTransaction`) auto-detects local accounts and uses raw ECDSA signing for EOA mode.
 
 ## API Reference
 
@@ -134,18 +129,27 @@ Approval is two-phase: `sender_approved` must be set before `payer_approved`.
 
 | Function | Description |
 |----------|-------------|
-| `buildFrameTransaction(params)` | Build a frame tx from SENDER calls. Auto-generates VERIFY prefix. |
+| `buildFrameTransaction(params)` | Build a frame tx from calls. Auto-generates VERIFY prefix. Supports `accountType`. |
 | `insertVerifyData(tx, { frameIndex, data })` | Insert signature into a VERIFY frame. Returns new tx (immutable). |
 | `serializeFrameTransaction(tx)` | Validate and RLP-serialize as type `0x06`. |
-| `prepareFrameTransaction(client, params)` | Build frame tx + compute sig hash. Resolves chainId/sender/nonce from client. |
-| `sendFrameTransaction(client, params)` | Self-pay one-shot: build, sign, serialize, send. Resolves chainId/sender/nonce from client. |
+| `prepareFrameTransaction(client, params)` | Build + compute sig hash. Resolves chainId/sender/nonce from client. |
+| `sendFrameTransaction(client, params)` | One-shot: build, sign, serialize, send. |
 | `sendPreparedFrameTransaction(client, params)` | Send a prepared tx with sender + payer signatures. |
+
+### EOA Helpers
+
+| Function | Description |
+|----------|-------------|
+| `signEoaVerifyFrame(tx, privateKey, index?)` | Sign a VERIFY frame with raw ECDSA (no EIP-191 prefix). |
+| `encodeEcdsaVerifyData({ v, r, s })` | Encode ECDSA signature as `0x00 + v + r + s` (66 bytes). |
+| `encodeEoaSenderData(calls)` | RLP-encode calls as `[[target, value, data], ...]` for EOA SENDER frames. |
 
 ### Utils
 
 | Function | Description |
 |----------|-------------|
-| `computeFrameSigHash(tx)` | Compute keccak256(rlp(tx)) with VERIFY data elided. |
+| `computeFrameSigHash(tx)` | Compute `keccak256(0x06 \|\| rlp(tx))` with VERIFY data elided. |
+| `computeTxHash(tx)` | Compute `keccak256(0x06 \|\| rlp(tx))` — the transaction hash. |
 | `validateFrameTransaction(tx)` | Validate against EIP-8141 static constraints. |
 | `deserializeFrameTransaction(hex)` | Decode a serialized type `0x06` transaction. |
 
@@ -155,9 +159,10 @@ Approval is two-phase: `sender_approved` must be set before `payer_approved`.
 |------|-------------|
 | `Frame` | A single frame: `{ mode, target, gasLimit, data }` |
 | `FrameTransaction` | Full tx: `{ chainId, nonce, sender, frames, ...gas }` |
-| `FrameCall` | User-facing call: `{ target, data, gasLimit, atomicBatch? }` |
+| `FrameCall` | User-facing call: `{ target, value?, data, gasLimit, atomicBatch? }` |
 | `FrameMode` | Enum: `DEFAULT (0)`, `VERIFY (1)`, `SENDER (2)` |
 | `ApprovalScope` | Enum: `ANY (0)`, `EXECUTION (1)`, `PAYMENT (2)`, `BOTH (3)` |
+| `AccountType` | `"eoa" \| "smart-account"` |
 
 ### Decorator
 
@@ -165,7 +170,8 @@ Approval is two-phase: `sender_approved` must be set before `payer_approved`.
 import { frameActions } from "@wonderland/frame-transactions";
 
 const client = createWalletClient({ ... }).extend(frameActions());
-await client.sendFrameTransaction({ ... });
+await client.sendFrameTransaction({ calls: [...], accountType: "eoa" });
+await client.prepareFrameTransaction({ ... });
 await client.sendPreparedFrameTransaction({ ... });
 ```
 
@@ -180,17 +186,11 @@ await client.sendPreparedFrameTransaction({ ... });
 
 ## Local Development
 
-1. Install dependencies: `pnpm install`
-
-| Script | Description |
-|--------|-------------|
-| `build` | Build library using tsc |
-| `check-types` | Check types using tsc |
-| `clean` | Remove `dist` folder |
-| `test` | Run tests using vitest |
-| `test:cov` | Run tests with coverage report |
-| `lint` | Run ESLint |
-| `format` | Check formatting with Prettier |
+```
+pnpm install
+pnpm test        # 107 tests
+pnpm build
+```
 
 ## References
 
