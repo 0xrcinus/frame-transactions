@@ -50,7 +50,7 @@ The payload is defined as the RLP serialization of the following:
 ```
 [chain_id, nonce, sender, frames, max_priority_fee_per_gas, max_fee_per_gas, max_fee_per_blob_gas, blob_versioned_hashes]
 
-frames = [[mode, target, value, gas_limit, data], ...]
+frames = [[mode, target, value, data, gas_limit], ...]
 ```
 
 If no blobs are included, `blob_versioned_hashes` must be an empty list and `max_fee_per_blob_gas` must be `0`.
@@ -61,11 +61,11 @@ Each frame has five fields:
 
 | Field     | Type             | Description |
 |-----------|------------------|-------------|
-| `mode`    | uint16           | Execution mode (bit 0) and group ID (bits 8-15) |
-| `target`  | address or null  | Target address. Null defaults to `tx.sender` |
-| `value`   | uint256          | ETH value to forward with the call |
-| `gas_limit` | uint64         | Gas allocated to this frame |
-| `data`    | bytes            | Calldata |
+| `mode`      | uint16           | Execution mode (bit 0) and group ID (bits 8-15) |
+| `target`    | address or null  | Target address. Null defaults to `tx.sender` |
+| `value`     | uint256          | ETH value to forward with the call |
+| `data`      | bytes            | Calldata |
+| `gas_limit` | uint64           | Gas allocated to this frame |
 
 #### Frame Modes
 
@@ -268,7 +268,7 @@ Initialize with transaction-scoped variables:
 
 Then for each call frame:
 
-2. Execute a call with the specified `mode`, `target`, `value`, `gas_limit`, and `data`.
+2. Execute a call with the specified `mode`, `target`, `value`, `data`, and `gas_limit`.
    - If `target` is null, set the call target to `tx.sender`.
    - If mode is `EXECUTE` and `sender_approved == true`:
        - Set `caller` as `tx.sender`.
@@ -791,16 +791,16 @@ Frame 0 verifies the signature and calls `APPROVE`. Frames 1 and 2 are in group 
 | Max fee per blob gas              | 1     |
 | Blob versioned hashes (empty)     | 1     |
 | Frames wrapper                    | 1     |
+| Sender validation frame: mode     | 1     |
 | Sender validation frame: target   | 1     |
 | Sender validation frame: value    | 1     |
-| Sender validation frame: gas      | 2     |
 | Sender validation frame: data     | 65    |
-| Sender validation frame: mode     | 1     |
+| Sender validation frame: gas      | 2     |
+| Execution frame: mode             | 1     |
 | Execution frame: target           | 20    |
 | Execution frame: value            | 5     |
-| Execution frame: gas              | 1     |
 | Execution frame: data             | 0     |
-| Execution frame: mode             | 1     |
+| Execution frame: gas              | 1     |
 | **Total**                         | 134   |
 
 Notes: Nonce assumes < 65536 prior sends. Fees assume < 1099 gwei. Validation frame target is 1 byte because target is `tx.sender`. Validation frame value is 1 byte (0). Validation gas assumes <= 65,536 gas. Validation data is 65 bytes for ECDSA signature. Execution frame target is full 20-byte address. Execution frame value is 5 bytes for ETH amount. Blob fields assume no blobs (empty list, zero max fee).
@@ -811,11 +811,11 @@ The value field adds 1 byte per frame for zero-value calls (the common case — 
 
 | Field                      | Bytes |
 | -------------------------- | ----- |
+| Deployment frame: mode     | 1     |
 | Deployment frame: target   | 20    |
 | Deployment frame: value    | 1     |
-| Deployment frame: gas      | 3     |
 | Deployment frame: data     | 100   |
-| Deployment frame: mode     | 1     |
+| Deployment frame: gas      | 3     |
 | **Total additional**       | 125   |
 
 Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0).
@@ -824,21 +824,21 @@ Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0
 
 | Field                                | Bytes |
 | ------------------------------------ | ----- |
+| Sponsor validation frame: mode     | 1     |
 | Sponsor validation frame: target   | 20    |
 | Sponsor validation frame: value    | 1     |
-| Sponsor validation frame: gas      | 3     |
 | Sponsor validation frame: calldata | 0     |
-| Sponsor validation frame: mode     | 1     |
+| Sponsor validation frame: gas      | 3     |
+| Send to sponsor frame: mode        | 1     |
 | Send to sponsor frame: target      | 20    |
 | Send to sponsor frame: value       | 1     |
-| Send to sponsor frame: gas         | 3     |
 | Send to sponsor frame: calldata    | 68    |
-| Send to sponsor frame: mode        | 1     |
+| Send to sponsor frame: gas         | 3     |
+| Sponsor post op frame: mode        | 2     |
 | Sponsor post op frame: target      | 20    |
 | Sponsor post op frame: value       | 1     |
-| Sponsor post op frame: gas         | 3     |
 | Sponsor post op frame: calldata    | 0     |
-| Sponsor post op frame: mode        | 2     |
+| Sponsor post op frame: gas         | 3     |
 | **Total additional**               | 145   |
 
 Notes: Sponsor can read info from other fields. ERC-20 transfer call is 68 bytes.
