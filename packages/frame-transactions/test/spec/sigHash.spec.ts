@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { Hex, Address } from "viem";
-import { computeFrameSigHash } from "../../src/utils/sigHash.js";
-import { FrameMode, ApprovalScope, buildMode } from "../../src/types/frame.js";
-import type { FrameTransaction } from "../../src/types/frame.js";
+import {
+    computeFrameSigHash,
+    FrameMode,
+    ApprovalScope,
+    buildMode,
+    type FrameTransaction,
+} from "../../src/index.js";
 
 const sender = "0x1111111111111111111111111111111111111111" as Address;
 const target = "0x2222222222222222222222222222222222222222" as Address;

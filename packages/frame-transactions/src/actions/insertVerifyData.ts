@@ -20,6 +20,14 @@ export type InsertVerifyDataParameters = {
  * @param tx - The frame transaction
  * @param params - The frame index and data to insert
  * @returns A new frame transaction with the VERIFY data inserted
+ *
+ * @example
+ * import { insertVerifyData } from '@wonderland/frame-transactions'
+ *
+ * const signed = insertVerifyData(frameTx, {
+ *   frameIndex: 0,
+ *   data: signatureHex,
+ * })
  */
 export function insertVerifyData(
     tx: FrameTransaction,

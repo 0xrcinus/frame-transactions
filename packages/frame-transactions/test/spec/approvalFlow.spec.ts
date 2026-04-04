@@ -5,7 +5,7 @@ import {
     buildMode,
     getApprovalScope,
     getExecutionMode,
-} from "../../src/types/frame.js";
+} from "../../src/index.js";
 
 describe("EIP-8141 approval flow (mode bits and scope constraints)", () => {
     describe("buildMode / getExecutionMode", () => {

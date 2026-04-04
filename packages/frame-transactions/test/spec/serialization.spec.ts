@@ -1,11 +1,14 @@
 import { describe, it, expect } from "vitest";
 import type { Hex, Address } from "viem";
-import { FRAME_TX_TYPE, FrameMode, ApprovalScope, buildMode } from "../../src/types/frame.js";
-import type { FrameTransaction } from "../../src/types/frame.js";
 import {
-    serializeFrameTransactionRlp,
+    FRAME_TX_TYPE,
+    FrameMode,
+    ApprovalScope,
+    buildMode,
     deserializeFrameTransaction,
-} from "../../src/utils/encoding.js";
+    type FrameTransaction,
+} from "../../src/index.js";
+import { serializeFrameTransactionRlp } from "../../src/utils/encoding.js";
 
 const sender = "0x1111111111111111111111111111111111111111" as Address;
 const target = "0x2222222222222222222222222222222222222222" as Address;

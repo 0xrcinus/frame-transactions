@@ -1,19 +1,19 @@
 import { describe, it, expect } from "vitest";
 import type { Hex, Address } from "viem";
-import { buildFrameTransaction } from "../../src/actions/buildFrameTransaction.js";
-import { insertVerifyData } from "../../src/actions/insertVerifyData.js";
-import { serializeFrameTransaction } from "../../src/actions/serializeFrameTransaction.js";
-import { computeFrameSigHash } from "../../src/utils/sigHash.js";
-import { deserializeFrameTransaction } from "../../src/utils/encoding.js";
 import {
+    buildFrameTransaction,
+    insertVerifyData,
+    serializeFrameTransaction,
+    computeFrameSigHash,
+    deserializeFrameTransaction,
     FrameMode,
     ApprovalScope,
     buildMode,
     getExecutionMode,
     getApprovalScope,
     hasAtomicBatchFlag,
-} from "../../src/types/frame.js";
-import type { FrameTransaction } from "../../src/types/frame.js";
+    type FrameTransaction,
+} from "../../src/index.js";
 
 const sender = "0x1111111111111111111111111111111111111111" as Address;
 const recipient = "0x2222222222222222222222222222222222222222" as Address;
@@ -64,7 +64,7 @@ describe("EIP-8141 spec examples", () => {
 
             const signed = insertVerifyData(tx, {
                 frameIndex: 0,
-                data: "0x" + "ab".repeat(65) as Hex,
+                data: ("0x" + "ab".repeat(65)) as Hex,
             });
 
             const serialized = serializeFrameTransaction(signed);
@@ -251,7 +251,7 @@ describe("EIP-8141 spec examples", () => {
             expect(sigHash).toMatch(/^0x[0-9a-f]{64}$/);
 
             // 3. Insert signature (dummy for test)
-            const dummySig = "0x" + "ab".repeat(65) as Hex;
+            const dummySig = ("0x" + "ab".repeat(65)) as Hex;
             const signed = insertVerifyData(tx, { frameIndex: 0, data: dummySig });
             expect(signed.frames[0]!.data).toBe(dummySig);
 

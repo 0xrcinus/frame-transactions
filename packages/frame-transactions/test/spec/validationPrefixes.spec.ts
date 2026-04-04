@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import type { Hex, Address } from "viem";
-import { buildFrameTransaction } from "../../src/actions/buildFrameTransaction.js";
 import {
+    buildFrameTransaction,
     FrameMode,
     ApprovalScope,
     getExecutionMode,
     getApprovalScope,
-} from "../../src/types/frame.js";
+} from "../../src/index.js";
 
 const sender = "0x1111111111111111111111111111111111111111" as Address;
 const target = "0x2222222222222222222222222222222222222222" as Address;

@@ -4,6 +4,8 @@ export {
     FRAME_TX_INTRINSIC_COST,
     ENTRY_POINT,
     MAX_FRAMES,
+    DEFAULT_VERIFY_GAS_LIMIT,
+    EMPTY_DATA,
     FrameMode,
     ApprovalScope,
     type Frame,
@@ -23,9 +25,15 @@ export {
 // Errors
 export {
     FrameTransactionError,
+    type FrameTransactionErrorType,
     InvalidFrameError,
+    type InvalidFrameErrorType,
     InvalidValidationPrefixError,
+    type InvalidValidationPrefixErrorType,
     SerializationError,
+    type SerializationErrorType,
+    AccountError,
+    type AccountErrorType,
 } from "./errors/index.js";
 
 // Actions
@@ -51,6 +59,8 @@ export {
     computeTxHash,
 } from "./utils/encoding.js";
 export { validateFrameTransaction } from "./utils/validation.js";
+export { signFrameVerify } from "./utils/signing.js";
+export { findVerifyIndices } from "./utils/findVerifyIndices.js";
 
 // EOA helpers
 export {
