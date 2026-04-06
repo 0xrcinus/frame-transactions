@@ -1,3 +1,4 @@
+import { isAddress } from "viem";
 import type { Frame, FrameTransaction } from "../types/frame.js";
 import {
     FrameMode,
@@ -52,8 +53,10 @@ function validateFrame(frame: Frame, index: number, allFrames: Frame[]): void {
         );
     }
 
-    if (frame.target !== null && !frame.target.startsWith("0x")) {
-        throw new InvalidFrameError(`Frame ${index}: target must be a hex address or null`);
+    if (frame.target !== null && !isAddress(frame.target)) {
+        throw new InvalidFrameError(`Frame ${index}: target must be a valid address or null`, {
+            details: `Got "${frame.target}"`,
+        });
     }
 
     if (hasAtomicBatchFlag(frame.mode)) {

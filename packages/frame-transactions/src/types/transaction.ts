@@ -42,6 +42,8 @@ export type BuildFrameTransactionParameters = {
      * - `'eoa'`: SENDER frames target null (sender) with RLP-encoded subcalls as data.
      */
     accountType?: AccountType;
+    /** Gas limit for auto-generated VERIFY frames (default: 100_000n) */
+    verifyGasLimit?: bigint;
 };
 
 /** Result of building a frame transaction */

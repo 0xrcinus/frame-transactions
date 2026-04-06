@@ -3,15 +3,17 @@ import {
     type Address,
     toRlp,
     fromRlp,
-    toHex,
     numberToHex,
     hexToBigInt,
     concatHex,
     keccak256,
 } from "viem";
 import type { Frame, FrameTransaction } from "../types/frame.js";
-import { FRAME_TX_TYPE, MAX_FRAMES } from "../types/frame.js";
-import { InvalidFrameError, SerializationError } from "../errors/index.js";
+import { FRAME_TX_TYPE } from "../types/frame.js";
+import { SerializationError } from "../errors/index.js";
+
+/** Recursive array type matching viem's toRlp input */
+type RlpInput = Hex | readonly RlpInput[];
 
 /** Encode a bigint for RLP: 0n becomes "0x" (empty bytes), nonzero uses numberToHex */
 function rlpBigInt(value: bigint): Hex {
@@ -31,6 +33,8 @@ function rlpToBigInt(hex: Hex): bigint {
 function encodeFrame(frame: Frame): Hex[] {
     return [
         rlpBigInt(BigInt(frame.mode)),
+        // null target encodes as "0x" (empty bytes) in RLP, representing
+        // "default to tx.sender". Decoded back to null in deserializeFrameTransaction.
         frame.target ?? "0x",
         rlpBigInt(frame.gasLimit),
         frame.data,
@@ -44,15 +48,9 @@ function encodeFrame(frame: Frame): Hex[] {
  *           max_fee_per_gas, max_fee_per_blob_gas, blob_versioned_hashes]
  */
 export function encodeFrameTransactionPayload(tx: FrameTransaction): Hex {
-    if (tx.frames.length === 0 || tx.frames.length > MAX_FRAMES) {
-        throw new InvalidFrameError(
-            `Frame count must be between 1 and ${MAX_FRAMES}, got ${tx.frames.length}`,
-        );
-    }
-
     const encodedFrames = tx.frames.map(encodeFrame);
 
-    const fields: readonly (Hex | Hex[] | Hex[][])[] = [
+    const fields: RlpInput[] = [
         rlpBigInt(tx.chainId),
         rlpBigInt(tx.nonce),
         tx.sender,
@@ -63,7 +61,7 @@ export function encodeFrameTransactionPayload(tx: FrameTransaction): Hex {
         tx.blobVersionedHashes,
     ];
 
-    return toRlp(fields as readonly Hex[]);
+    return toRlp(fields);
 }
 
 /**

@@ -3,6 +3,8 @@ export {
     FRAME_TX_INTRINSIC_COST,
     ENTRY_POINT,
     MAX_FRAMES,
+    DEFAULT_VERIFY_GAS_LIMIT,
+    EMPTY_DATA,
     FrameMode,
     ApprovalScope,
     type Frame,

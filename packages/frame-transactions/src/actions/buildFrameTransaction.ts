@@ -1,10 +1,9 @@
-import type { Hex } from "viem";
 import type {
     BuildFrameTransactionParameters,
     BuildFrameTransactionReturnType,
 } from "../types/transaction.js";
 import type { Frame } from "../types/frame.js";
-import { FrameMode, ApprovalScope, buildMode } from "../types/frame.js";
+import { FrameMode, ApprovalScope, buildMode, DEFAULT_VERIFY_GAS_LIMIT, EMPTY_DATA } from "../types/frame.js";
 import { encodeEoaSenderData } from "../eoa.js";
 import { validateFrameTransaction } from "../utils/validation.js";
 
@@ -21,6 +20,18 @@ import { validateFrameTransaction } from "../utils/validation.js";
  *
  * @param params - The build parameters with user calls and optional paymaster/deploy config
  * @returns A complete frame transaction with validation prefix
+ *
+ * @example
+ * import { buildFrameTransaction } from '@wonderland/frame-transactions'
+ *
+ * const tx = buildFrameTransaction({
+ *   chainId: 1n,
+ *   nonce: 0n,
+ *   sender: '0x...',
+ *   calls: [{ target: '0x...', data: '0x...', gasLimit: 100_000n }],
+ *   maxPriorityFeePerGas: 1_000_000_000n,
+ *   maxFeePerGas: 2_000_000_000n,
+ * })
  */
 export function buildFrameTransaction(
     params: BuildFrameTransactionParameters,
@@ -37,6 +48,7 @@ export function buildFrameTransaction(
         paymaster,
         deploy,
         accountType = "smart-account",
+        verifyGasLimit = DEFAULT_VERIFY_GAS_LIMIT,
     } = params;
 
     const frames: Frame[] = [];
@@ -56,24 +68,24 @@ export function buildFrameTransaction(
         // Sponsored: sender approves execution only (scope 0x1)
         frames.push({
             mode: buildMode(FrameMode.VERIFY, ApprovalScope.EXECUTION),
-            target: null, // null defaults to sender
-            gasLimit: 100000n,
-            data: "0x" as Hex, // placeholder for signature
+            target: null,
+            gasLimit: verifyGasLimit,
+            data: EMPTY_DATA,
         });
         // Payer VERIFY frame: paymaster approves payment (scope 0x2)
         frames.push({
             mode: buildMode(FrameMode.VERIFY, ApprovalScope.PAYMENT),
             target: paymaster,
-            gasLimit: 100000n,
-            data: "0x" as Hex, // placeholder for paymaster signature
+            gasLimit: verifyGasLimit,
+            data: EMPTY_DATA,
         });
     } else {
         // Self-pay: sender approves both execution and payment (scope 0x3)
         frames.push({
             mode: buildMode(FrameMode.VERIFY, ApprovalScope.BOTH),
-            target: null, // null defaults to sender
-            gasLimit: 100000n,
-            data: "0x" as Hex, // placeholder for signature
+            target: null,
+            gasLimit: verifyGasLimit,
+            data: EMPTY_DATA,
         });
     }
 

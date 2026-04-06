@@ -6,30 +6,38 @@ export const FRAME_TX_INTRINSIC_COST = 15000n;
 export const ENTRY_POINT = "0x00000000000000000000000000000000000000aa" as Address;
 export const MAX_FRAMES = 1000;
 
+/** Default gas limit for auto-generated VERIFY frames */
+export const DEFAULT_VERIFY_GAS_LIMIT = 100_000n;
+
+/** Empty data placeholder for unsigned VERIFY frames */
+export const EMPTY_DATA = "0x" as Hex;
+
 /** Frame execution mode (lower 8 bits of mode field) */
-export enum FrameMode {
+export const FrameMode = {
     /** Execute as ENTRY_POINT */
-    DEFAULT = 0,
+    DEFAULT: 0,
     /** Validation frame, must call APPROVE */
-    VERIFY = 1,
+    VERIFY: 1,
     /** Execute on behalf of sender */
-    SENDER = 2,
-}
+    SENDER: 2,
+} as const;
+export type FrameMode = (typeof FrameMode)[keyof typeof FrameMode];
 
 /**
  * Approval scope for VERIFY frames.
  * Constrains what the APPROVE opcode can approve.
  */
-export enum ApprovalScope {
+export const ApprovalScope = {
     /** Any scope allowed */
-    ANY = 0,
+    ANY: 0,
     /** Only execution approval (0x1) */
-    EXECUTION = 1,
+    EXECUTION: 1,
     /** Only payment approval (0x2) */
-    PAYMENT = 2,
+    PAYMENT: 2,
     /** Only combined execution + payment (0x3) */
-    BOTH = 3,
-}
+    BOTH: 3,
+} as const;
+export type ApprovalScope = (typeof ApprovalScope)[keyof typeof ApprovalScope];
 
 /** A single frame in a frame transaction */
 export type Frame = {

@@ -12,6 +12,12 @@ import { serializeFrameTransactionRlp } from "../utils/encoding.js";
  *
  * @param tx - The frame transaction to serialize
  * @returns The serialized transaction as a hex string
+ *
+ * @example
+ * import { serializeFrameTransaction } from '@wonderland/frame-transactions'
+ *
+ * const serialized = serializeFrameTransaction(signedTx)
+ * // serialized starts with '0x06' (EIP-8141 type prefix)
  */
 export function serializeFrameTransaction(tx: FrameTransaction): SerializedFrameTransaction {
     validateFrameTransaction(tx);

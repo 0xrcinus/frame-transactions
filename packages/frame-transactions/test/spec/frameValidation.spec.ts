@@ -1,8 +1,14 @@
 import { describe, it, expect } from "vitest";
 import type { Hex, Address } from "viem";
-import { validateFrameTransaction } from "../../src/utils/validation.js";
-import { FrameMode, ApprovalScope, buildMode, MAX_FRAMES } from "../../src/types/frame.js";
-import type { Frame, FrameTransaction } from "../../src/types/frame.js";
+import {
+    validateFrameTransaction,
+    FrameMode,
+    ApprovalScope,
+    buildMode,
+    MAX_FRAMES,
+    type Frame,
+    type FrameTransaction,
+} from "../../src/index.js";
 
 const sender = "0x1111111111111111111111111111111111111111" as Address;
 const target = "0x2222222222222222222222222222222222222222" as Address;

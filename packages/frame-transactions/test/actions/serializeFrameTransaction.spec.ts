@@ -22,7 +22,7 @@ describe("serializeFrameTransaction", () => {
         // Insert dummy signature
         const signed = insertVerifyData(tx, {
             frameIndex: 0,
-            data: "0x" + "ab".repeat(65) as Hex,
+            data: ("0x" + "ab".repeat(65)) as Hex,
         });
 
         const serialized = serializeFrameTransaction(signed);

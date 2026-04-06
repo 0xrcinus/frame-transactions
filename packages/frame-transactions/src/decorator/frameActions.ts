@@ -44,14 +44,32 @@ export type FrameActions = {
 /**
  * Decorator that adds frame transaction actions to a viem client.
  *
- * Usage:
- * ```ts
- * const client = createWalletClient({ ... }).extend(frameActions())
- * await client.sendFrameTransaction({ calls: [...], ... })
- * ```
+ * @example
+ * import { createWalletClient, http } from 'viem'
+ * import { privateKeyToAccount } from 'viem/accounts'
+ * import { mainnet } from 'viem/chains'
+ * import { frameActions } from '@wonderland/frame-transactions'
+ *
+ * const client = createWalletClient({
+ *   account: privateKeyToAccount('0x...'),
+ *   chain: mainnet,
+ *   transport: http(),
+ * }).extend(frameActions())
+ *
+ * const hash = await client.sendFrameTransaction({
+ *   calls: [{ target: '0x...', data: '0x...', gasLimit: 100_000n }],
+ *   maxPriorityFeePerGas: 1_000_000_000n,
+ *   maxFeePerGas: 2_000_000_000n,
+ * })
  */
 export function frameActions() {
-    return (client: Client<Transport, Chain, Account>): FrameActions => ({
+    return <
+        transport extends Transport = Transport,
+        chain extends Chain | undefined = Chain | undefined,
+        account extends Account | undefined = Account | undefined,
+    >(
+        client: Client<transport, chain, account>,
+    ): FrameActions => ({
         sendFrameTransaction: (parameters) => sendFrameTransaction(client, parameters),
         prepareFrameTransaction: (parameters) => prepareFrameTransaction(client, parameters),
         sendPreparedFrameTransaction: (parameters) =>
