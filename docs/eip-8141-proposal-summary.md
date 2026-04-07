@@ -26,7 +26,7 @@ APPROVE takes no scope operand. Sender calling APPROVE approves execution and se
 
 ### 5. Group IDs instead of atomic batch flags
 
-The batch flag (a forward reference to the next frame) is replaced by a group ID in bits 8-15 of the mode field. Contiguous EXECUTE frames with the same non-zero group ID are atomic. Group 0 means independent.
+The batch flag (a forward reference to the next frame) is replaced by a group ID in bits 8-15 of the mode field. Contiguous EXECUTE frames with the same group ID are atomic. A frame whose group ID is unique in the transaction executes independently — no special-cased ID.
 
 ### 6. Explicit continuation after revert
 
@@ -55,5 +55,5 @@ bit 10:    atomic batch flag
 # After
 bit 0:     mode (VERIFY=0, EXECUTE=1)
 bits 1-7:  reserved
-bits 8-15: group ID (0 = independent)
+bits 8-15: group ID (same ID = atomic group)
 ```

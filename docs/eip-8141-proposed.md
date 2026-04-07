@@ -104,7 +104,7 @@ The upper bits (> 0) of `mode` configure the execution environment.
 | 1-7       | Reserved         | Must be zero  |
 | 8-15      | Group ID         | EXECUTE mode  |
 
-Group IDs are used for atomic batching (see below). A group ID of 0 means the frame is independent (not part of an atomic group).
+Group IDs are used for atomic batching (see below). Contiguous EXECUTE frames with the same group ID form an atomic group. A frame whose group ID is unique in the transaction is independent.
 
 #### Constraints
 
@@ -130,23 +130,14 @@ for frame in tx.frames:
     if group_id != 0:
         assert (frame.mode & 0x1) == 1  # must be EXECUTE
 
-# Non-zero group IDs must appear on at least two EXECUTE frames
-# and frames in the same group must be contiguous
-from collections import Counter
-group_counts = Counter((f.mode >> 8) & 0xFF for f in tx.frames if (f.mode & 0x1) == 1)
-for group_id, count in group_counts.items():
-    if group_id != 0:
-        assert count >= 2
-
-# Contiguity: frames with the same non-zero group ID must be adjacent
-last_group = 0
+# Contiguity: frames with the same group ID must be adjacent
+last_group = None
 seen_groups = set()
 for frame in tx.frames:
     group_id = (frame.mode >> 8) & 0xFF
-    if group_id != 0:
-        if group_id != last_group and group_id in seen_groups:
-            raise Exception("non-contiguous group")
-        seen_groups.add(group_id)
+    if group_id != last_group and group_id in seen_groups:
+        raise Exception("non-contiguous group")
+    seen_groups.add(group_id)
     last_group = group_id
 ```
 
@@ -294,7 +285,7 @@ Then for each call frame:
    - If `frame.target` has no code, or has an EIP-7702 delegation indicator whose target has no code, execute the logic described in [default code](#default-code).
    - The `ORIGIN` opcode returns frame `caller` throughout all call depths.
    - If a frame's execution reverts:
-     - If the frame is part of an atomic group (non-zero group ID), handle according to the atomic group rules below.
+     - If the frame is part of a multi-frame atomic group, handle according to the atomic group rules below.
      - Otherwise, the frame's state changes are discarded and execution continues to the next frame.
    - A reverted EXECUTE frame does not halt the transaction. Execution always proceeds to the next frame (or the next frame after a reverted group). Only a VERIFY frame failing to call APPROVE makes the transaction invalid.
 3. If frame has mode `VERIFY` and the frame did not successfully call `APPROVE`, the transaction is invalid.
@@ -303,7 +294,7 @@ After the last VERIFY frame completes, increment the sender's nonce and collect 
 
 #### Atomic Groups
 
-Contiguous EXECUTE frames with the same non-zero group ID form an **atomic group**. Within a group, if any frame reverts, all preceding frames in the group are also reverted and all subsequent frames in the group are skipped. Frames in the same group must be adjacent — non-contiguous groups are invalid.
+Contiguous EXECUTE frames with the same group ID form an **atomic group**. Within a group, if any frame reverts, all preceding frames in the group are also reverted and all subsequent frames in the group are skipped. Frames in the same group must be adjacent — non-contiguous groups are invalid. A frame whose group ID appears only once in the transaction is a single-frame group and executes independently.
 
 More precisely, execution of an atomic group proceeds as follows:
 
@@ -313,8 +304,6 @@ More precisely, execution of an atomic group proceeds as follows:
    - Restore the state to the snapshot taken before the group.
    - Mark all remaining frames in the group as skipped.
 
-Frames with group ID 0 are independent — they execute and revert individually.
-
 For example, given frames:
 
 | Frame | Mode    | Group ID |
@@ -323,9 +312,9 @@ For example, given frames:
 | 1     | EXECUTE | 1        |
 | 2     | EXECUTE | 2        |
 | 3     | EXECUTE | 2        |
-| 4     | EXECUTE | 0        |
+| 4     | EXECUTE | 3        |
 
-Frames 0-1 form one atomic group and frames 2-3 form another. Frame 4 is independent. If frame 3 reverts, the state changes from frames 2 and 3 are discarded. Frames 0-1 and frame 4 are unaffected.
+Frames 0-1 form one atomic group and frames 2-3 form another. Frame 4 is the only frame with group ID 3, so it executes independently. If frame 3 reverts, the state changes from frames 2 and 3 are discarded. Frames 0-1 and frame 4 are unaffected.
 
 After executing all frames, verify that `sender_approved == true` and `payer` has sufficient balance. If not, the whole transaction is invalid. Refund any unused gas to `payer`.
 
@@ -675,13 +664,13 @@ Every other Ethereum transaction type has a value field. Frames are the unit of 
 
 ### Atomic groups
 
-Frames that should succeed or fail together share a non-zero group ID. Group ID 0 means independent. All frames in a group must be contiguous EXECUTE frames. If any frame in a group reverts, the entire group is reverted.
+Frames that should succeed or fail together share a group ID. All frames in a group must be contiguous EXECUTE frames. If any frame in a group reverts, the entire group is reverted. A frame whose group ID is unique in the transaction executes independently.
 
 Group IDs are a label on each frame rather than a forward reference. An ERC-20 paymaster pattern with multiple atomic groups (approve+swap, refund) just assigns each group its own ID.
 
 ### Continuation after revert
 
-A reverted EXECUTE frame does not halt the transaction. Independent frames revert in isolation and execution moves on. Atomic groups revert together, and execution continues after the group. Only a VERIFY frame failing to APPROVE invalidates the transaction.
+A reverted EXECUTE frame does not halt the transaction. Single-frame groups revert in isolation and execution moves on. Multi-frame groups revert together, and execution continues after the group. Only a VERIFY frame failing to APPROVE invalidates the transaction.
 
 This matters for paymaster flows: a post-op frame needs to run even if the user's call reverted, so the paymaster can settle gas accounting. A batch of independent transfers should let each succeed or fail on its own. If you want "stop everything on any failure," put all frames in one group.
 

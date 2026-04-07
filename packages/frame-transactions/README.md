@@ -1,14 +1,10 @@
-# @wonderland/frame-transactions
+# frame-transactions
+
+> **Experimental proof-of-concept.** This library exists to further discussion and development of [EIP-8141](https://eips.ethereum.org/EIPS/eip-8141). It is not published on npm and APIs may change without notice.
 
 A TypeScript library for building, signing, and serializing Frame Transactions ([EIP-8141](https://eips.ethereum.org/EIPS/eip-8141)).
 
 Frame transactions (tx type `0x06`) replace the single ECDSA signature with an array of **frames**. Each frame specifies a mode (VERIFY, SENDER, or DEFAULT), a target, and data, which together support pluggable auth, gas sponsorship, and batched execution.
-
-## Installation
-
-```
-pnpm add @wonderland/frame-transactions
-```
 
 ## Quick Start
 
@@ -17,7 +13,7 @@ pnpm add @wonderland/frame-transactions
 ```typescript
 import { createWalletClient, createPublicClient, http, parseEther, parseGwei } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { frameActions } from "@wonderland/frame-transactions";
+import { frameActions } from "frame-transactions";
 
 const account = privateKeyToAccount(PRIVATE_KEY);
 
@@ -83,7 +79,7 @@ import {
     computeTxHash,
     signEoaVerifyFrame,   // for EOAs
     insertVerifyData,      // for smart accounts
-} from "@wonderland/frame-transactions";
+} from "frame-transactions";
 
 // 1. Build: auto-generates VERIFY prefix from calls
 const frameTx = buildFrameTransaction({
@@ -167,7 +163,7 @@ The viem decorator (`sendFrameTransaction`) auto-detects local accounts and uses
 ### Decorator
 
 ```typescript
-import { frameActions } from "@wonderland/frame-transactions";
+import { frameActions } from "frame-transactions";
 
 const client = createWalletClient({ ... }).extend(frameActions());
 await client.sendFrameTransaction({ calls: [...], accountType: "eoa" });

@@ -1,5 +1,7 @@
 # Frame Transactions (EIP-8141)
 
+> **Experimental proof-of-concept.** This project exists to further discussion and development of [EIP-8141](https://eips.ethereum.org/EIPS/eip-8141). The SDK is not published on npm and APIs may change without notice.
+
 TypeScript SDK, spec proposals, and demo apps for [EIP-8141 Frame Transactions](https://eips.ethereum.org/EIPS/eip-8141), tested against the live [ethrex](https://github.com/lambdaclass/ethrex) testnet.
 
 ## What is EIP-8141?
@@ -51,7 +53,7 @@ pnpm --filter frame-transactions-demo run sponsored-send
 ```typescript
 import { createWalletClient, http, parseEther, parseGwei } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { frameActions } from "@wonderland/frame-transactions";
+import { frameActions } from "frame-transactions";
 
 const client = createWalletClient({ chain, transport: http(RPC_URL), account })
     .extend(frameActions());
