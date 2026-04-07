@@ -1,29 +1,40 @@
 # Frame Transactions (EIP-8141)
 
-TypeScript SDK and demo apps for [EIP-8141 Frame Transactions](https://eips.ethereum.org/EIPS/eip-8141), tested against the live [ethrex](https://github.com/lambdaclass/ethrex) testnet.
-
-## Packages
-
-| Package | Description |
-|---------|-------------|
-| [`@wonderland/frame-transactions`](./packages/frame-transactions) | SDK — build, sign, serialize frame transactions for viem |
-| [`frame-transactions-demo`](./apps/demo) | Demo scripts against the ethrex EIP-8141 testnet |
+TypeScript SDK, spec proposals, and demo apps for [EIP-8141 Frame Transactions](https://eips.ethereum.org/EIPS/eip-8141), tested against the live [ethrex](https://github.com/lambdaclass/ethrex) testnet.
 
 ## What is EIP-8141?
 
-A new transaction type (`0x06`) that replaces the single ECDSA signature with an ordered list of **frames**. Each frame has a mode (VERIFY or EXECUTE/SENDER), a target, a value, gas limit, and data. This enables:
+A new transaction type (`0x06`) that replaces the single ECDSA signature with an ordered list of **frames**. Each frame has a mode (VERIFY or EXECUTE), a target, a value, gas limit, and data. This enables:
 
-- Pluggable authentication (ECDSA, P256, smart account logic)
+- Pluggable authentication (ECDSA, smart account logic, with extensibility for delegation and PQ schemes)
 - Gas sponsorship (separate sender and payer)
 - Atomic batching (all-or-nothing frame groups)
 - Account deployment in the same transaction
 - Native support for both EOAs and smart accounts
 
-## Quick Start
+## Repository
+
+| Directory | Description |
+|-----------|-------------|
+| [`packages/frame-transactions`](./packages/frame-transactions) | SDK for building, signing, and serializing frame transactions with viem |
+| [`apps/demo`](./apps/demo) | Demo scripts against the ethrex EIP-8141 testnet |
+| [`docs/`](./docs) | Spec proposals and implementation feedback |
+
+### Docs
+
+| Document | Description |
+|----------|-------------|
+| [eip-8141.md](./docs/eip-8141.md) | Upstream EIP-8141 spec (reference copy) |
+| [eip-8141-proposed.md](./docs/eip-8141-proposed.md) | Our proposed rewrite of the spec |
+| [eip-8141-proposal-summary.md](./docs/eip-8141-proposal-summary.md) | Short summary of what we changed and why |
+| [spec-feedback.md](./docs/spec-feedback.md) | Observations from implementing the SDK |
+| [ethrex-bugs.md](./docs/ethrex-bugs.md) | Bugs found in the ethrex implementation |
+
+## Quick start
 
 ```
 pnpm install
-pnpm test          # 107 tests
+pnpm test
 pnpm build
 ```
 
@@ -53,9 +64,9 @@ const hash = await client.sendFrameTransaction({
 });
 ```
 
-See the [SDK README](./packages/frame-transactions/README.md) for full API documentation.
+See the [SDK README](./packages/frame-transactions/README.md) for full API docs.
 
-## Demo Results
+## Demo results
 
 Tested against `https://demo.eip-8141.ethrex.xyz/rpc` (chain 1729):
 
@@ -76,13 +87,18 @@ Tested against `https://demo.eip-8141.ethrex.xyz/rpc` (chain 1729):
 │   │   ├── utils/                 # sigHash, encoding, validation, computeTxHash
 │   │   ├── eoa.ts                 # EOA helpers (ECDSA signing, RLP encoding)
 │   │   └── external.ts            # public API
-│   └── test/                      # 107 tests
+│   └── test/
 ├── apps/demo/                     # Demo scripts
 │   └── src/
 │       ├── simple-send.ts
 │       ├── batch-send.ts
 │       └── sponsored-send.ts
-└── 8141-proposal.md               # EIP-8141 spec reference and notes
+└── docs/                          # Spec proposals and feedback
+    ├── eip-8141.md                # Upstream spec
+    ├── eip-8141-proposed.md       # Proposed rewrite
+    ├── eip-8141-proposal-summary.md
+    ├── spec-feedback.md
+    └── ethrex-bugs.md
 ```
 
 ## References
