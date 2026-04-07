@@ -119,7 +119,7 @@ If the intent is that APPROVE is a general-purpose opcode any frame can use, the
 
 ## Simplification proposals
 
-The issues above (especially #6) point toward a simpler design. [0xrcinus's post on Ethereum Magicians](https://ethereum-magicians.org/t/eip-8141-frame-transaction/27617/104) proposes three simplifications that match our implementation experience.
+The issues above (especially #6) point toward a simpler design. As [proposed on Ethereum Magicians](https://ethereum-magicians.org/t/eip-8141-frame-transaction/27617/104), three simplifications would address most of the friction we hit.
 
 ### Two modes, not three
 
@@ -211,4 +211,4 @@ The core frame transaction design is sound. Composable validation, sig hash elis
 3. **APPROVE being unrestricted to VERIFY frames** undermines the validation/execution separation that the spec is built around.
 4. **Atomic batch flags are a fragile forward-linking mechanism.** Group IDs would be cleaner.
 
-The simplifications proposed by 0xrcinus on Ethereum Magicians (two modes, no scope bits, group-based atomicity) would have eliminated a lot of implementation complexity in our SDK. They address real friction we encountered, not theoretical concerns.
+The simplifications proposed on Ethereum Magicians (two modes, no scope bits, group-based atomicity) would have eliminated a lot of implementation complexity in our SDK.
