@@ -50,7 +50,7 @@ The payload is defined as the RLP serialization of the following:
 ```
 [chain_id, nonce, sender, frames, max_priority_fee_per_gas, max_fee_per_gas, max_fee_per_blob_gas, blob_versioned_hashes]
 
-frames = [[mode, target, gas_limit, value, data], ...]
+frames = [[mode, target, value, gas_limit, data], ...]
 ```
 
 If no blobs are included, `blob_versioned_hashes` must be an empty list and `max_fee_per_blob_gas` must be `0`.
@@ -61,11 +61,11 @@ Each frame has five fields:
 
 | Field     | Type             | Description |
 |-----------|------------------|-------------|
-| `mode`      | uint16           | Execution mode (bit 0) and group ID (bits 8-15) |
-| `target`    | address or null  | Target address. Null defaults to `tx.sender` |
-| `gas_limit` | uint64           | Gas allocated to this frame |
-| `value`     | uint256          | ETH value to forward with the call |
-| `data`      | bytes            | Calldata |
+| `mode`    | uint16           | Execution mode (bit 0) and group ID (bits 8-15) |
+| `target`  | address or null  | Target address. Null defaults to `tx.sender` |
+| `value`   | uint256          | ETH value to forward with the call |
+| `gas_limit` | uint64         | Gas allocated to this frame |
+| `data`    | bytes            | Calldata |
 
 #### Frame Modes
 
@@ -104,7 +104,7 @@ The upper bits (> 0) of `mode` configure the execution environment.
 | 1-7       | Reserved         | Must be zero  |
 | 8-15      | Group ID         | EXECUTE mode  |
 
-Group IDs are used for atomic batching (see below). All EXECUTE frames with the same group ID are atomic — they execute or revert together.
+Group IDs are used for atomic batching (see below). A group ID of 0 means the frame is independent (not part of an atomic group).
 
 #### Constraints
 
@@ -129,6 +129,25 @@ for frame in tx.frames:
     group_id = (frame.mode >> 8) & 0xFF
     if group_id != 0:
         assert (frame.mode & 0x1) == 1  # must be EXECUTE
+
+# Non-zero group IDs must appear on at least two EXECUTE frames
+# and frames in the same group must be contiguous
+from collections import Counter
+group_counts = Counter((f.mode >> 8) & 0xFF for f in tx.frames if (f.mode & 0x1) == 1)
+for group_id, count in group_counts.items():
+    if group_id != 0:
+        assert count >= 2
+
+# Contiguity: frames with the same non-zero group ID must be adjacent
+last_group = 0
+seen_groups = set()
+for frame in tx.frames:
+    group_id = (frame.mode >> 8) & 0xFF
+    if group_id != 0:
+        if group_id != last_group and group_id in seen_groups:
+            raise Exception("non-contiguous group")
+        seen_groups.add(group_id)
+    last_group = group_id
 ```
 
 #### Receipt
@@ -183,7 +202,7 @@ The behavior of `APPROVE` depends on the caller's identity:
     - If `sender_approved == false`, revert the frame.
     - Set `payer = ADDRESS`.
 
-The sender must approve before any non-sender payer. This is a data flow requirement: the sender's APPROVE sets `payer = tx.sender` as a default, and a subsequent payer APPROVE overwrites it. If the payer approved first, the sender would overwrite the payer. Subsequent APPROVE calls from non-sender addresses overwrite `payer`, so the last non-sender VERIFY frame determines who pays for gas.
+Subsequent APPROVE calls from non-sender addresses overwrite `payer`. This allows the last VERIFY frame to determine who pays for gas.
 
 After the last VERIFY frame in the transaction completes, the protocol increments the sender's nonce and collects the total gas cost from `payer`. If `payer` has insufficient balance, the transaction is invalid.
 
@@ -261,7 +280,7 @@ Initialize with transaction-scoped variables:
 
 Then for each call frame:
 
-2. Execute a call with the specified `mode`, `target`, `gas_limit`, `value`, and `data`.
+2. Execute a call with the specified `mode`, `target`, `value`, `gas_limit`, and `data`.
    - If `target` is null, set the call target to `tx.sender`.
    - If mode is `EXECUTE` and `sender_approved == true`:
        - Set `caller` as `tx.sender`.
@@ -281,7 +300,7 @@ After the last VERIFY frame completes, increment the sender's nonce and collect 
 
 #### Atomic Groups
 
-EXECUTE frames with the same non-zero group ID form an **atomic group**. Within a group, if any frame reverts, all preceding frames in the group are also reverted and all subsequent frames in the group are skipped.
+Contiguous EXECUTE frames with the same non-zero group ID form an **atomic group**. Within a group, if any frame reverts, all preceding frames in the group are also reverted and all subsequent frames in the group are skipped. Frames in the same group must be adjacent — non-contiguous groups are invalid.
 
 More precisely, execution of an atomic group proceeds as follows:
 
@@ -291,35 +310,25 @@ More precisely, execution of an atomic group proceeds as follows:
    - Restore the state to the snapshot taken before the group.
    - Mark all remaining frames in the group as skipped.
 
-Group 0 is not special — it is atomic like any other group. Frames that should be independent must use distinct group IDs.
+Frames with group ID 0 are independent — they execute and revert individually.
 
 For example, given frames:
 
 | Frame | Mode    | Group ID |
 |-------|---------|----------|
-| 0     | EXECUTE | 0        |
-| 1     | EXECUTE | 0        |
-| 2     | EXECUTE | 1        |
-| 3     | EXECUTE | 1        |
-| 4     | EXECUTE | 2        |
-
-All frames in group 0 (frames 0-1) are atomic. All frames in group 1 (frames 2-3) are atomic. Frame 4 is in group 2 alone, so it reverts independently. If frame 3 reverts, frames 2 and 3 are discarded. Groups 0 and 2 are unaffected.
-
-Unlike the atomic batch flag approach, groups need not be contiguous:
-
-| Frame | Mode    | Group ID |
-|-------|---------|----------|
 | 0     | EXECUTE | 1        |
-| 1     | EXECUTE | 2        |
-| 2     | EXECUTE | 1        |
+| 1     | EXECUTE | 1        |
+| 2     | EXECUTE | 2        |
+| 3     | EXECUTE | 2        |
+| 4     | EXECUTE | 0        |
 
-Frames 0 and 2 form an atomic group. If frame 2 reverts, frame 0 is also reverted. Frame 1 is unaffected.
+Frames 0-1 form one atomic group and frames 2-3 form another. Frame 4 is independent. If frame 3 reverts, the state changes from frames 2 and 3 are discarded. Frames 0-1 and frame 4 are unaffected.
 
 After executing all frames, verify that `sender_approved == true` and `payer` has sufficient balance. If not, the whole transaction is invalid. Refund any unused gas to `payer`.
 
 Note:
 
-- The sender must approve before any non-sender payer, because the sender's APPROVE sets `payer = tx.sender` which would overwrite any earlier payer. Once `sender_approved` becomes `true` it cannot be reverted.
+- It is implied by the handling that the sender must approve the transaction *before* a non-sender payer can approve, and that once `sender_approved` becomes `true` it cannot be reverted.
 
 #### Default code
 
@@ -677,7 +686,7 @@ ETH transfers are the most basic Ethereum operation. Without a frame-level value
 
 ### Atomic groups instead of batch flags
 
-The atomic batch flag is a forward-reference ("I'm atomic with the next frame") that requires careful placement and only supports contiguous sequences. Group IDs are a label — simpler to construct, simpler to validate, and they support non-contiguous atomicity. For example, an ERC-20 paymaster pattern with three independent atomic groups (DAI transfer, approve+swap, refund) is naturally expressed with group IDs but requires careful flag choreography with batch flags.
+The atomic batch flag is a forward-reference ("I'm atomic with the next frame") that requires careful placement and creates off-by-one traps (set flag on all-but-last). Group IDs are a label — assign the same ID to frames that should be atomic together. Simpler to construct, simpler to validate. For example, an ERC-20 paymaster pattern with multiple atomic groups (approve+swap, refund) is naturally expressed by labeling each group.
 
 ### EOA default code simplification
 
@@ -784,16 +793,16 @@ Frame 0 verifies the signature and calls `APPROVE`. Frames 1 and 2 are in group 
 | Max fee per blob gas              | 1     |
 | Blob versioned hashes (empty)     | 1     |
 | Frames wrapper                    | 1     |
-| Sender validation frame: mode     | 1     |
 | Sender validation frame: target   | 1     |
-| Sender validation frame: gas      | 2     |
 | Sender validation frame: value    | 1     |
+| Sender validation frame: gas      | 2     |
 | Sender validation frame: data     | 65    |
-| Execution frame: mode             | 1     |
+| Sender validation frame: mode     | 1     |
 | Execution frame: target           | 20    |
-| Execution frame: gas              | 1     |
 | Execution frame: value            | 5     |
+| Execution frame: gas              | 1     |
 | Execution frame: data             | 0     |
+| Execution frame: mode             | 1     |
 | **Total**                         | 134   |
 
 Notes: Nonce assumes < 65536 prior sends. Fees assume < 1099 gwei. Validation frame target is 1 byte because target is `tx.sender`. Validation frame value is 1 byte (0). Validation gas assumes <= 65,536 gas. Validation data is 65 bytes for ECDSA signature. Execution frame target is full 20-byte address. Execution frame value is 5 bytes for ETH amount. Blob fields assume no blobs (empty list, zero max fee).
@@ -804,11 +813,11 @@ The value field adds 1 byte per frame for zero-value calls (the common case — 
 
 | Field                      | Bytes |
 | -------------------------- | ----- |
-| Deployment frame: mode     | 1     |
 | Deployment frame: target   | 20    |
-| Deployment frame: gas      | 3     |
 | Deployment frame: value    | 1     |
+| Deployment frame: gas      | 3     |
 | Deployment frame: data     | 100   |
+| Deployment frame: mode     | 1     |
 | **Total additional**       | 125   |
 
 Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0).
@@ -817,21 +826,21 @@ Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0
 
 | Field                                | Bytes |
 | ------------------------------------ | ----- |
-| Sponsor validation frame: mode     | 1     |
 | Sponsor validation frame: target   | 20    |
-| Sponsor validation frame: gas      | 3     |
 | Sponsor validation frame: value    | 1     |
+| Sponsor validation frame: gas      | 3     |
 | Sponsor validation frame: calldata | 0     |
-| Send to sponsor frame: mode        | 1     |
+| Sponsor validation frame: mode     | 1     |
 | Send to sponsor frame: target      | 20    |
-| Send to sponsor frame: gas         | 3     |
 | Send to sponsor frame: value       | 1     |
+| Send to sponsor frame: gas         | 3     |
 | Send to sponsor frame: calldata    | 68    |
-| Sponsor post op frame: mode        | 2     |
+| Send to sponsor frame: mode        | 1     |
 | Sponsor post op frame: target      | 20    |
-| Sponsor post op frame: gas         | 3     |
 | Sponsor post op frame: value       | 1     |
+| Sponsor post op frame: gas         | 3     |
 | Sponsor post op frame: calldata    | 0     |
+| Sponsor post op frame: mode        | 2     |
 | **Total additional**               | 145   |
 
 Notes: Sponsor can read info from other fields. ERC-20 transfer call is 68 bytes.

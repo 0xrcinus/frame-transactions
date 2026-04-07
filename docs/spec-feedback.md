@@ -50,7 +50,7 @@ Our rewrite restricts APPROVE to VERIFY frames at the opcode level.
 
 The per-frame atomic batch flag means "I'm atomic with the next frame" — a forward reference that's easy to get wrong. Builders must set the flag on all-but-last (off-by-one trap), validation must check the next frame exists and is SENDER mode, and only contiguous sequences are supported.
 
-Group IDs are a label rather than a forward reference. Simpler to construct, simpler to validate, and they support non-contiguous atomicity (e.g., an ERC-20 paymaster pattern with interleaved groups).
+Group IDs are a label rather than a forward reference. Simpler to construct, simpler to validate.
 
 ## Minor notes
 
