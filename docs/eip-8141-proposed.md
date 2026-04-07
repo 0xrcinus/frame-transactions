@@ -291,7 +291,7 @@ Then for each call frame:
    - If mode is `VERIFY`:
        - Set the `caller` to `ENTRY_POINT`.
        - Assert `frame.value == 0`.
-   - If `frame.target` has no code, execute the logic described in [default code](#default-code).
+   - If `frame.target` has no code, or has an EIP-7702 delegation indicator whose target has no code, execute the logic described in [default code](#default-code).
    - The `ORIGIN` opcode returns frame `caller` throughout all call depths.
    - If a frame's execution reverts, its state changes are discarded. Additionally, if this frame has a non-zero group ID, handle according to the atomic group rules below.
 3. If frame has mode `VERIFY` and the frame did not successfully call `APPROVE`, the transaction is invalid.
@@ -332,29 +332,28 @@ Note:
 
 #### Default code
 
-When using frame transactions with EOAs (accounts with no code), they are treated as if they have a "default code." This spec describes only the behavior of the default code; clients are free to implement the default code however they want, so long as they correspond to the behavior specified here.
+When a frame targets an account with no code, or an account with an EIP-7702 delegation indicator whose target has no code, the account is treated as if it has "default code." This includes accounts that previously had a 7702 delegation which was cleared (delegated to `address(0)`, which resets the code to empty). Clients are free to implement default code however they want, so long as it matches the behavior specified here.
 
 - Retrieve the `mode` with `TXPARAMLOAD`.
 - If `mode` is `VERIFY`:
   - If `frame.target != tx.sender`, revert.
   - Read the first byte of `frame.data` as `signature_type`.
   - If `signature_type` is:
-    - `0x0`:
+    - `0x00` (ECDSA):
       - Read the rest of `frame.data` as `(v, r, s)`.
       - If `frame.target != ecrecover(sig_hash, v, r, s)`, where `sig_hash = compute_sig_hash(tx)`, revert.
-    - `0x1`:
-      - Read the rest of `frame.data` as `(r, s, qx, qy)`.
-      - If `frame.target != keccak256(qx|qy)[12:]`, revert.
-      - If `P256VERIFY(sig_hash, r, s, qx, qy) != true`, where `sig_hash = compute_sig_hash(tx)`, revert.
     - Otherwise revert.
   - Call `APPROVE`.
 - If `mode` is `EXECUTE`:
   - Execute the call normally: `call(target=frame.target, value=frame.value, data=frame.data)` with `msg.sender = tx.sender` (if sender approved) or `msg.sender = ENTRY_POINT` (if not).
   - This is identical to the smart account behavior — no special encoding is needed.
 
+##### Reserved signature types
+
+Only ECDSA (`0x00`) is defined by this spec. Signature types `0x01`–`0xff` are reserved for future use by companion EIPs (e.g., key delegation, post-quantum schemes, P256). EOAs that need non-ECDSA signing before such extensions exist can set account code and use smart account VERIFY.
+
 Notes:
 
-- It's implied that for the P256 (r1) signature type, the sender address must be `keccak256(qx|qy)[12:]`.
 - EOA EXECUTE frames use the same semantics as smart account EXECUTE frames. The `value` field on the frame handles ETH transfers at the protocol level. No RLP subcall encoding is required.
 
 Here's the logic above implemented in Python:
@@ -363,8 +362,7 @@ Here's the logic above implemented in Python:
 VERIFY  = 0
 EXECUTE = 1
 
-SECP256K1 = 0x0
-P256      = 0x1
+ECDSA = 0x00
 
 def default_code(frame, tx):
     mode = frame.mode & 0x1
@@ -373,7 +371,7 @@ def default_code(frame, tx):
         signature_type = frame.data[0]
         sig_hash       = compute_sig_hash(tx)
 
-        if signature_type == SECP256K1:
+        if signature_type == ECDSA:
             if len(frame.data) != 66:
                 revert()
             v = frame.data[1]
@@ -382,20 +380,8 @@ def default_code(frame, tx):
             if frame.target != ecrecover(sig_hash, v, r, s):
                 revert()
 
-        elif signature_type == P256:
-            if len(frame.data) != 129:
-                revert()
-            r  = frame.data[1:33]
-            s  = frame.data[33:65]
-            qx = frame.data[65:97]
-            qy = frame.data[97:129]
-            if frame.target != keccak256(qx + qy)[12:]:
-                revert()
-            if not P256VERIFY(sig_hash, r, s, qx, qy):
-                revert()
-
         else:
-            revert()
+            revert()  # 0x01-0xff reserved for companion EIPs
 
         APPROVE()
 
@@ -672,25 +658,29 @@ The `frame.data` of `VERIFY` frames is elided from the signature hash. This is d
 
 `APPROVE` terminates the executing frame successfully like `RETURN`, but it actually updates the transaction scoped approval state during execution. It is still required that only the sender can toggle the `sender_approved` to `true`. Only the `frame.target` can call `APPROVE` generally, because it allows the transaction pool and other frames to better reason about `VERIFY` mode frames.
 
-APPROVE takes no scope operand. The caller's identity determines the semantics: if the sender calls APPROVE, it approves both execution and payment. If a non-sender calls APPROVE, it approves payment (overwriting the payer). This eliminates the need for scope bits in the mode field and removes the ordering footguns of the explicit scope approach, while producing the same result for all practical use cases (self-pay and sponsored transactions).
+APPROVE takes no scope operand. The caller's identity determines the semantics: if the sender calls APPROVE, it approves both execution and payment. If a non-sender calls APPROVE, it approves payment (overwriting the payer). This covers self-pay (sender approves everything) and sponsored (sender approves execution, paymaster approves payment) without explicit scope selection.
 
-APPROVE is restricted to VERIFY frames. This makes the validation/execution separation a protocol invariant rather than a convention. VERIFY frames validate, EXECUTE frames execute.
+APPROVE is restricted to VERIFY frames. VERIFY frames validate, EXECUTE frames execute, and the protocol enforces this. Approval state can't be mutated as a side effect of execution, so the approval flow can be determined from the transaction's VERIFY frames alone.
 
-### Two modes instead of three
+### Frame modes
 
-DEFAULT and SENDER both mean "execute code" with different callers (ENTRY_POINT vs tx.sender). The caller can be inferred from the approval state: EXECUTE frames before sender approval have ENTRY_POINT as caller, EXECUTE frames after have tx.sender. This eliminates the need for a third mode and simplifies the mental model to "are you validating or executing?"
+Frames are either validating (VERIFY) or executing (EXECUTE). The caller of an EXECUTE frame is determined by the approval state: before sender approval, the caller is ENTRY_POINT (used for deployment and setup); after sender approval, the caller is tx.sender. This keeps the mode field to a single bit and reduces frame construction to one question: "is this frame validating or executing?"
 
 ### Value in frame
 
-ETH transfers are the most basic Ethereum operation. Without a frame-level value field, smart accounts must implement their own `execute(target, value, data)` methods to forward ETH to payable functions, and EOAs need RLP-encoded subcall lists to express value. Adding value to the frame structure makes ETH transfers a first-class operation at the protocol level, unifies behavior across account types, and eliminates the need for EOA default code to define its own subcall encoding.
+Every other Ethereum transaction type has a value field. Frames are the unit of execution in 8141, and ETH transfers are the most basic Ethereum operation. Including value in the frame structure means ETH transfers work at the protocol level without account-specific workarounds. Both EOAs and smart accounts use the same `(target, value, data)` semantics on EXECUTE frames.
 
-### Atomic groups instead of batch flags
+### Atomic groups
 
-The atomic batch flag is a forward-reference ("I'm atomic with the next frame") that requires careful placement and creates off-by-one traps (set flag on all-but-last). Group IDs are a label — assign the same ID to frames that should be atomic together. Simpler to construct, simpler to validate. For example, an ERC-20 paymaster pattern with multiple atomic groups (approve+swap, refund) is naturally expressed by labeling each group.
+Frames that should succeed or fail together share a non-zero group ID. Group ID 0 means independent. All frames in a group must be contiguous EXECUTE frames. If any frame in a group reverts, the entire group is reverted.
 
-### EOA default code simplification
+Group IDs are a label on each frame rather than a forward reference. An ERC-20 paymaster pattern with multiple atomic groups (approve+swap, refund) just assigns each group its own ID.
 
-With a frame-level value field, EOA EXECUTE frames use the same semantics as smart account EXECUTE frames: `target` is the call target, `value` is the ETH amount, `data` is calldata. No RLP subcall encoding is needed. The only remaining EOA-specific behavior is the VERIFY frame signature format (ECDSA or P256).
+### EOA default code
+
+EOA EXECUTE frames use the same semantics as smart account EXECUTE frames: `target` is the call target, `value` is the ETH amount, `data` is calldata. The only EOA-specific behavior is the VERIFY frame, which verifies an ECDSA signature against the account address.
+
+Default code handles only ECDSA — the one scheme existing EOAs use. The `signature_type` byte reserves `0x01`–`0xff` for companion EIPs to define additional signing schemes (key delegation, P256, post-quantum, etc.) without changes to this spec. EOAs that need non-ECDSA signing before such extensions exist can set account code via EIP-7702 and use smart account VERIFY.
 
 ### Payer in receipt
 
