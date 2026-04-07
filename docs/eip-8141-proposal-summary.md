@@ -28,11 +28,19 @@ APPROVE takes no scope operand. Sender calling APPROVE approves execution and se
 
 The batch flag (a forward reference to the next frame) is replaced by a group ID in bits 8-15 of the mode field. Contiguous EXECUTE frames with the same non-zero group ID are atomic. Group 0 means independent.
 
-### 6. ECDSA-only default code
+### 6. Explicit continuation after revert
+
+The current spec implies but doesn't state that execution continues after a reverted EXECUTE frame. Our rewrite makes it explicit: a reverted independent frame has its state discarded and execution moves to the next frame. A reverted atomic group has the whole group reverted and execution continues after the group. Only a VERIFY frame failing to APPROVE halts the transaction.
+
+### 7. ECDSA-only default code
 
 Remove P256 as a built-in signature type. Default code handles only ECDSA — the one scheme existing EOAs need. Signature types `0x01`–`0xff` are reserved for companion EIPs to define additional schemes (delegation, P256, post-quantum, etc.) without changes to this spec.
 
-### 7. Wallet signing note
+### 8. Default code applies to empty 7702 delegations
+
+An account with an EIP-7702 delegation indicator whose target has no code should be treated as an EOA for default code purposes. Without this, the account is stuck: the delegation indicator means "has code" so default code doesn't run, but the target is empty so there's nothing to execute.
+
+### 9. Wallet signing note
 
 EOA default code correctly uses raw `ecrecover` (no EIP-191 prefix) for domain separation. Wallets will need to support `signTransaction` for type 0x06, same as they did for EIP-1559 and EIP-4844.
 

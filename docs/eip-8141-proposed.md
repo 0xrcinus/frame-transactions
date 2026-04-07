@@ -293,7 +293,10 @@ Then for each call frame:
        - Assert `frame.value == 0`.
    - If `frame.target` has no code, or has an EIP-7702 delegation indicator whose target has no code, execute the logic described in [default code](#default-code).
    - The `ORIGIN` opcode returns frame `caller` throughout all call depths.
-   - If a frame's execution reverts, its state changes are discarded. Additionally, if this frame has a non-zero group ID, handle according to the atomic group rules below.
+   - If a frame's execution reverts:
+     - If the frame is part of an atomic group (non-zero group ID), handle according to the atomic group rules below.
+     - Otherwise, the frame's state changes are discarded and execution continues to the next frame.
+   - A reverted EXECUTE frame does not halt the transaction. Execution always proceeds to the next frame (or the next frame after a reverted group). Only a VERIFY frame failing to call APPROVE makes the transaction invalid.
 3. If frame has mode `VERIFY` and the frame did not successfully call `APPROVE`, the transaction is invalid.
 
 After the last VERIFY frame completes, increment the sender's nonce and collect the total gas cost from `payer`. If `payer` has insufficient balance, the transaction is invalid.
@@ -675,6 +678,12 @@ Every other Ethereum transaction type has a value field. Frames are the unit of 
 Frames that should succeed or fail together share a non-zero group ID. Group ID 0 means independent. All frames in a group must be contiguous EXECUTE frames. If any frame in a group reverts, the entire group is reverted.
 
 Group IDs are a label on each frame rather than a forward reference. An ERC-20 paymaster pattern with multiple atomic groups (approve+swap, refund) just assigns each group its own ID.
+
+### Continuation after revert
+
+A reverted EXECUTE frame does not halt the transaction. Independent frames revert in isolation and execution moves on. Atomic groups revert together, and execution continues after the group. Only a VERIFY frame failing to APPROVE invalidates the transaction.
+
+This matters for paymaster flows: a post-op frame needs to run even if the user's call reverted, so the paymaster can settle gas accounting. A batch of independent transfers should let each succeed or fail on its own. If you want "stop everything on any failure," put all frames in one group.
 
 ### EOA default code
 

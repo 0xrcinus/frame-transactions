@@ -62,6 +62,14 @@ There's also a practical problem: both signature types verify directly against t
 
 Our rewrite keeps only ECDSA in default code (the one scheme existing EOAs actually use) and reserves `signature_type` `0x01`–`0xff` for companion EIPs to define delegation, P256, post-quantum schemes, or other signing approaches.
 
+### Revert behavior for EXECUTE frames isn't explicit
+
+The spec says a reverted frame's "state changes are discarded" but doesn't say whether execution continues to the next frame. Reading the spec closely, continuation is implied (the receipt has per-frame status, `TXPARAM 0x15` returns status of prior frames, and the execution loop has no break condition on revert). But it should be stated directly.
+
+This is somewhat counterintuitive — in most contexts a revert halts everything. Here, the default is continuation and you opt into coupled failure via atomic groups. An independent frame reverting is more like a try/catch that swallows the error. This matters for paymaster post-op frames that need to run regardless of whether the user's call succeeded.
+
+Our rewrite makes this explicit: a reverted EXECUTE frame never halts the transaction, execution always proceeds. Only a VERIFY frame failing to call APPROVE makes the transaction invalid.
+
 ### Default code needs to account for EIP-7702 delegation states
 
 The spec says default code applies to "accounts with no code," but doesn't address EIP-7702 delegation. An account can have a 7702 delegation indicator (`0xef0100 || address`) where the target has no code. In that state the account technically has code (23 bytes of indicator), but the resolved code is empty. If default code only checks for "no code," these accounts are stuck: the delegation indicator means default code doesn't run, but there's nothing at the delegation target either.
