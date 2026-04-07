@@ -82,8 +82,7 @@ Tested against `https://demo.eip-8141.ethrex.xyz/rpc` (chain 1729):
 │       ├── simple-send.ts
 │       ├── batch-send.ts
 │       └── sponsored-send.ts
-├── DEMO.md                        # Demo results and status
-└── ISSUE.md                       # Design document and current status
+└── 8141-proposal.md               # EIP-8141 spec reference and notes
 ```
 
 ## References

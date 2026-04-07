@@ -2,7 +2,7 @@
 
 A TypeScript library for building, signing, and serializing Frame Transactions ([EIP-8141](https://eips.ethereum.org/EIPS/eip-8141)).
 
-Frame transactions (tx type `0x06`) replace the single ECDSA signature with an array of **frames**, enabling arbitrary validation logic, gas sponsorship, and post-quantum signing schemes.
+Frame transactions (tx type `0x06`) replace the single ECDSA signature with an array of **frames**. Each frame specifies a mode (VERIFY, SENDER, or DEFAULT), a target, and data, which together support pluggable auth, gas sponsorship, and batched execution.
 
 ## Installation
 
