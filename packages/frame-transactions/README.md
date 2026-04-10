@@ -180,6 +180,23 @@ await client.sendPreparedFrameTransaction({ ... });
 | `ENTRY_POINT` | `0x00...aa` |
 | `MAX_FRAMES` | `1000` |
 
+## Known Limitations
+
+**Gas parameters are fully manual.** The SDK does not estimate gas or fetch fee data — callers must provide `maxFeePerGas`, `maxPriorityFeePerGas`, and a `gasLimit` on every `FrameCall`. This is the equivalent of calling `eth_sendRawTransaction` without `eth_estimateGas`. In practice you'll need to fetch the base fee yourself and compute fees:
+
+```typescript
+const block = await publicClient.getBlock();
+const baseFee = block.baseFeePerGas ?? 0n;
+const maxPriorityFeePerGas = 1_000_000_000n; // 1 gwei
+const maxFeePerGas = baseFee * 2n + maxPriorityFeePerGas;
+```
+
+Per-frame gas estimation (`eth_estimateGas` for type `0x06`) is not yet supported by any RPC, so frame `gasLimit` values must be set manually for now.
+
+**EOA signing requires a local account.** EOA VERIFY frames use raw `ecrecover` with no EIP-191 prefix, which means the signer needs access to the private key to produce a prefix-free ECDSA signature. viem's `Account` interface doesn't expose this for JSON-RPC or hardware wallet accounts, so `sendFrameTransaction` with `accountType: "eoa"` only works with local (private key) accounts. This goes away once wallets add native `signTransaction` support for type `0x06`.
+
+These limitations and other observations from building this SDK are documented in [`spec-feedback.md`](../../docs/spec-feedback.md). Our [proposed spec rewrite](../../docs/eip-8141-proposed.md) addresses several of them (unified frame value field, simplified approval scope, group IDs for atomic batching).
+
 ## Local Development
 
 ```
