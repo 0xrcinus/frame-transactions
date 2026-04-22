@@ -8,7 +8,7 @@ status: Draft
 type: Standards Track
 category: Core
 created: 2026-01-29
-requires: 2718, 4844
+requires: 1559, 2718, 4844, 7997
 ---
 
 ## Abstract
@@ -29,8 +29,11 @@ In doing so, it realizes the original vision of account abstraction: unlinking a
 |---------------------------|-----------------|
 | `FRAME_TX_TYPE`           | `0x06`          |
 | `FRAME_TX_INTRINSIC_COST` | `15000`         |
+| `FRAME_TX_PER_FRAME_COST` | `475`           |
 | `ENTRY_POINT`             | `address(0xaa)` |
-| `MAX_FRAMES`              | `10^3`          |
+| `MAX_FRAMES`              | `64`            |
+
+`ENTRY_POINT` is a protocol-defined distinguished caller address used for `VERIFY` frames and for `EXECUTE` frames before sender approval. It is not specified as a deployed contract or precompile, and contracts MUST NOT assume anything about its code, balance, or caller type beyond address equality. Contracts called from `VERIFY` frames or pre-approval `EXECUTE` frames therefore observe `CALLER = ENTRY_POINT` and, in `VERIFY`, `CALLVALUE = 0`, so heuristics that infer EOA-or-contract properties from `CALLER` may not behave as expected. Its numeric equality with the `APPROVE` opcode value has no semantic significance.
 
 ### Opcodes
 
@@ -40,6 +43,7 @@ In doing so, it realizes the original vision of account abstraction: unlinking a
 | `TXPARAM`       | `0xb0` |
 | `FRAMEDATALOAD` | `0xb1` |
 | `FRAMEDATACOPY` | `0xb2` |
+| `FRAMEPARAM`    | `0xb3` |
 
 ### New Transaction Type
 
@@ -50,87 +54,93 @@ The payload is defined as the RLP serialization of the following:
 ```
 [chain_id, nonce, sender, frames, max_priority_fee_per_gas, max_fee_per_gas, max_fee_per_blob_gas, blob_versioned_hashes]
 
-frames = [[mode, target, value, gas_limit, data], ...]
+frames = [[mode, target, gas_limit, value, data], ...]
 ```
 
 If no blobs are included, `blob_versioned_hashes` must be an empty list and `max_fee_per_blob_gas` must be `0`.
 
-#### Frame Structure
+Frame transactions do not include an [EIP-7702](./eip-7702.md) authorization list and do not set, clear, or otherwise modify EIP-7702 delegation indicators.
 
-Each frame has five fields:
+For execution semantics, each frame has a **resolved target**:
 
-| Field     | Type             | Description |
-|-----------|------------------|-------------|
-| `mode`    | uint16           | Execution mode (bit 0) and group ID (bits 8-15) |
-| `target`  | address or null  | Target address. Null defaults to `tx.sender` |
-| `value`   | uint256          | ETH value to forward with the call |
-| `gas_limit` | uint64         | Gas allocated to this frame |
-| `data`    | bytes            | Calldata |
+```python
+resolved_target = frame.target if frame.target is not None else tx.sender
+```
+
+Unless otherwise stated, checks below that refer to the target account during execution use the resolved target.
+
+Each frame also has a `value` field, interpreted as the top-level call value in wei. A non-zero `value` is valid only in `EXECUTE` mode; `VERIFY` frames must set `value = 0`.
 
 #### Frame Modes
 
-The `mode` of each frame sets the context of execution. It allows the protocol to identify the purpose of the frame within the execution loop.
+The `mode` field is a uint16. Its low bit identifies the execution mode, and its high byte carries an atomic-group identifier. Bit positions in this specification are zero-based, with the least significant bit numbered `0`.
 
-The execution mode of a frame is identified by bit 0 of the `mode` field.
+| Mode bits | Meaning                                 |
+|-----------|-----------------------------------------|
+| 0         | Frame type (0 = `VERIFY`, 1 = `EXECUTE`) |
+| 1-7       | Reserved, must be zero                  |
+| 8-15      | Group ID (only valid on `EXECUTE`)      |
 
-| `mode & 0x1` | Name          | Summary                                    |
-|---------------|---------------|--------------------------------------------|
-| 0             | `VERIFY` mode | Frame identifies as transaction validation |
-| 1             | `EXECUTE` mode | Execute frame in the appropriate context  |
+| `mode & 0x1` | Name    | Summary                                    |
+|--------------|---------|--------------------------------------------|
+| 0            | `VERIFY`  | Frame identifies as transaction validation |
+| 1            | `EXECUTE` | Execute frame in the appropriate context   |
 
 ##### `VERIFY` Mode
 
 Identifies the frame as a validation frame. Its purpose is to *verify* that a sender and/or payer authorized the transaction. It must call `APPROVE` during execution. Failure to do so will result in the whole transaction being invalid.
 
-The execution behaves the same as `STATICCALL`, state cannot be modified. VERIFY frames must have `value = 0`.
+The execution behaves the same as `STATICCALL` for user code: state cannot otherwise be modified. The `APPROVE` opcode is the only exception and applies its protocol-defined effects.
 
-Frames in this mode will have their data elided from signature hash calculation and from introspection by other frames.
+Frames in this mode will have their data elided from signature hash calculation and from introspection by other frames. `VERIFY` frames must set `value = 0` and must not carry a group ID (bits 8-15 of `mode` must be zero).
 
 ##### `EXECUTE` Mode
 
 Frame executes as a regular call. The caller depends on the current approval state:
 
 - Before `sender_approved == true`: caller is `ENTRY_POINT`. This is the deployment context — used for account creation before the account can authorize itself.
-- After `sender_approved == true`: caller is `tx.sender`. This mode effectively acts on behalf of the transaction sender and can only be used after explicitly approved.
+- After `sender_approved == true`: caller is `tx.sender`. The frame effectively acts on behalf of the transaction sender.
 
-The `value` field is forwarded as `msg.value` to the target. The protocol handles the balance transfer.
+The `value` field is forwarded as `msg.value` to the resolved target, and the protocol performs the balance transfer from the caller. `EXECUTE` is the only mode that may send a non-zero `value`.
 
-##### Mode Flags
+##### Group IDs
 
-The upper bits (> 0) of `mode` configure the execution environment.
+Bits 8-15 of `mode` form the frame's **group ID**. Contiguous `EXECUTE` frames with the same group ID form an **atomic group**. A group may contain one or more frames; a frame whose group ID does not match either adjacent `EXECUTE` frame is a single-frame group and executes independently. Group ID `0` has no special meaning — it is a label like any other.
 
-| Mode bits | Meaning          | Valid with    |
-|-----------|------------------|---------------|
-| 1-7       | Reserved         | Must be zero  |
-| 8-15      | Group ID         | EXECUTE mode  |
+To express independent frames, assign each a group ID that does not match its neighbors. To express atomicity, assign the relevant frames the same group ID. Frames that share a group ID must be adjacent in the transaction — non-contiguous groups are invalid.
 
-Group IDs are used for atomic batching (see below). Contiguous EXECUTE frames with the same group ID form an atomic group. A frame whose group ID is unique in the transaction is independent.
+As a consequence of this rule, a sequence of `EXECUTE` frames that all carry the default group ID `0` is a single atomic group. This is a safer default than silent independence: if one frame reverts, the caller does not end up with a partially-applied transaction.
 
 #### Constraints
 
 Some validity constraints can be determined statically. They are outlined below:
 
 ```python
+# Constants (see Default Code section for full definitions)
+VERIFY  = 0
+EXECUTE = 1
+
 assert tx.chain_id < 2**256
 assert tx.nonce < 2**64
 assert len(tx.frames) > 0 and len(tx.frames) <= MAX_FRAMES
 assert len(tx.sender) == 20
-assert (tx.frames[n].mode & 0x1) < 2
-assert (tx.frames[n].mode >> 1) & 0x7F == 0          # bits 1-7 reserved
-assert len(tx.frames[n].target) == 20 or tx.frames[n].target is None
-
-# VERIFY frames must have value = 0
+assert tx.sender != bytes(20)
+total_frame_gas = 0
 for frame in tx.frames:
-    if (frame.mode & 0x1) == 0:  # VERIFY
+    assert frame.mode < 2**16
+    assert (frame.mode & 0x1) in (VERIFY, EXECUTE)
+    assert (frame.mode >> 1) & 0x7F == 0                 # bits 1-7 reserved
+    assert frame.target is None or len(frame.target) == 20
+    assert frame.gas_limit <= 2**63 - 1
+    assert frame.value < 2**256
+    # VERIFY frames must have value = 0 and no group ID
+    if (frame.mode & 0x1) == VERIFY:
         assert frame.value == 0
+        assert (frame.mode >> 8) == 0
+    total_frame_gas += frame.gas_limit
+    assert total_frame_gas <= 2**63 - 1
 
-# Group IDs only valid on EXECUTE frames
-for frame in tx.frames:
-    group_id = (frame.mode >> 8) & 0xFF
-    if group_id != 0:
-        assert (frame.mode & 0x1) == 1  # must be EXECUTE
-
-# Contiguity: frames with the same group ID must be adjacent
+# Contiguity: frames sharing a group ID must be adjacent.
 last_group = None
 seen_groups = set()
 for frame in tx.frames:
@@ -158,10 +168,12 @@ With the frame transaction, the signature may be at an arbitrary location in the
 
 ```python
 def compute_sig_hash(tx: FrameTx) -> Hash:
-    for i, frame in enumerate(tx.frames):
-        if (frame.mode & 0x1) == 0:  # VERIFY
-            tx.frames[i].data = Bytes()
-    return keccak(rlp(tx))
+    # Operate on a copy; the original transaction object is not modified.
+    tx_copy = deep_copy(tx)
+    for i, frame in enumerate(tx_copy.frames):
+        if (frame.mode & 0x1) == VERIFY:
+            tx_copy.frames[i].data = Bytes()
+    return keccak(bytes([FRAME_TX_TYPE]) + rlp(tx_copy))
 ```
 
 ### New Opcodes
@@ -170,9 +182,9 @@ def compute_sig_hash(tx: FrameTx) -> Hash:
 
 The `APPROVE` opcode is like `RETURN (0xf3)`. It exits the current context successfully and updates the transaction-scoped approval context.
 
-APPROVE may only be called during a `VERIFY` frame. Calling APPROVE from an `EXECUTE` frame results in an exceptional halt.
+`APPROVE` may only be called during a `VERIFY` frame. Calling `APPROVE` from an `EXECUTE` frame results in an exceptional halt.
 
-If the currently executing account is not `frame.target` (i.e. if `ADDRESS != frame.target`), `APPROVE` reverts.
+If the currently executing account is not the frame's resolved target (i.e. if `ADDRESS != resolved_target`), `APPROVE` reverts.
 
 ##### Stack
 
@@ -185,54 +197,72 @@ If the currently executing account is not `frame.target` (i.e. if `ADDRESS != fr
 
 The behavior of `APPROVE` depends on the caller's identity:
 
-- If `ADDRESS == tx.sender`:
-    - Set `sender_approved = true`.
+- If `ADDRESS == tx.sender` (sender approving):
     - If `sender_approved` was already set, revert the frame.
-    - Set `payer = tx.sender`.
-- If `ADDRESS != tx.sender`:
+    - Set `sender_approved = true` and `payer = tx.sender`.
+- If `ADDRESS != tx.sender` (non-sender approving payment):
     - If `sender_approved == false`, revert the frame.
-    - Set `payer = ADDRESS`.
+    - Set `payer = ADDRESS`. Subsequent non-sender approvals overwrite `payer`, so the last `VERIFY` frame determines who pays.
 
-Subsequent APPROVE calls from non-sender addresses overwrite `payer`. This allows the last VERIFY frame to determine who pays for gas.
+After the last `VERIFY` frame in the transaction completes successfully, the protocol increments `tx.sender`'s nonce and collects the transaction's maximum cost (`TXPARAM(0x06)`) from `payer`. If `payer` has insufficient balance at that point, the whole transaction is invalid.
 
-After the last VERIFY frame in the transaction completes, the protocol increments the sender's nonce and collects the total gas cost from `payer`. If `payer` has insufficient balance, the transaction is invalid.
+Because `DELEGATECALL` preserves `ADDRESS`, code executed via `DELEGATECALL` from the resolved target may also execute `APPROVE` successfully. Contracts that rely on `APPROVE` should therefore treat delegatecalled libraries as fully trusted.
 
 #### `TXPARAM` opcode
 
-This opcode gives access to information from the transaction header and/or frames. The gas cost of this operation is `2`.
+This opcode gives access to transaction-scoped information. The gas
+cost of this operation is `2`.
 
-It takes two values from the stack, `param` and `in2` (in this order). The `param` is the field to be extracted from the transaction. `in2` names a frame index.
+It takes one value from the stack, `param`. The `param` is the field to be extracted from the transaction.
 
-| `param` | `in2`       | Return value                                                                |
-|---------|-------------|-----------------------------------------------------------------------------|
-| 0x00    | must be 0   | current transaction type                                                    |
-| 0x01    | must be 0   | `nonce`                                                                     |
-| 0x02    | must be 0   | `sender`                                                                    |
-| 0x03    | must be 0   | `max_priority_fee_per_gas`                                                  |
-| 0x04    | must be 0   | `max_fee_per_gas`                                                           |
-| 0x05    | must be 0   | `max_fee_per_blob_gas`                                                      |
-| 0x06    | must be 0   | max cost (basefee=max, all gas used, includes blob cost and intrinsic cost) |
-| 0x07    | must be 0   | `len(blob_versioned_hashes)`                                                |
-| 0x08    | must be 0   | `compute_sig_hash(tx)`                                                      |
-| 0x09    | must be 0   | `len(frames)` (can be zero)                                                 |
-| 0x10    | must be 0   | currently executing frame index                                             |
-| 0x11    | frame index | `target`                                                                    |
-| 0x12    | frame index | `gas_limit`                                                                 |
-| 0x13    | frame index | `mode` (bit 0 of `frame.mode`: 0=VERIFY, 1=EXECUTE)                        |
-| 0x14    | frame index | `len(data)`                                                                 |
-| 0x15    | frame index | `status` (exceptional halt if current/future)                               |
-| 0x16    | frame index | `group_id` (bits 8-15 of `frame.mode`)                                      |
-| 0x17    | frame index | `value`                                                                     |
+| `param` | Return value                                                                |
+|---------|-----------------------------------------------------------------------------|
+| 0x00    | current transaction type                                                    |
+| 0x01    | `nonce`                                                                     |
+| 0x02    | `sender`                                                                    |
+| 0x03    | `max_priority_fee_per_gas`                                                  |
+| 0x04    | `max_fee_per_gas`                                                           |
+| 0x05    | `max_fee_per_blob_gas`                                                      |
+| 0x06    | max cost (basefee=max, all gas used, includes blob cost and intrinsic cost) |
+| 0x07    | `len(blob_versioned_hashes)`                                                |
+| 0x08    | `compute_sig_hash(tx)`                                                      |
+| 0x09    | `len(frames)`                                                               |
+| 0x0A    | currently executing frame index                                             |
 
 Notes:
 
 - `0x01` has a possible future extension to allow indices for multidimensional nonces.
 - `0x03` and `0x04` have a possible future extension to allow indices for multidimensional gas.
-- The `status` field (0x15) returns `0` for failure or `1` for success.
+- `0x06` covers only the maximum gas and blob fees. It does not include any `frame.value` transfers.
+- `0x07` returns only the number of blob versioned hashes. Individual blob versioned hashes remain accessible via the existing `BLOBHASH(index)` opcode.
+- `0x08` returns the canonical signature hash. This value MUST be computed at most once per transaction and cached.
 - Invalid `param` values (not defined in the table above) result in an exceptional halt.
-- Out-of-bounds access for frame index (`>= len(frames)`) results in an exceptional halt.
+
+#### `FRAMEPARAM` opcode
+
+This opcode gives access to frame-scoped information. The gas cost of this operation is `2`.
+
+It takes two values from the stack, `param` and `frameIndex` (in this order). The `frameIndex` is zero-based, so `0` refers to the first frame.
+
+| `param` | `frameIndex` | Return value                                                     |
+|---------|--------------|------------------------------------------------------------------|
+| 0x00    | frameIndex   | `target`                                                         |
+| 0x01    | frameIndex   | `gas_limit`                                                      |
+| 0x02    | frameIndex   | `mode` (full uint16)                                             |
+| 0x03    | frameIndex   | `len(data)`                                                      |
+| 0x04    | frameIndex   | `status` (exceptional halt if current/future)                    |
+| 0x05    | frameIndex   | `value`                                                          |
+| 0x06    | frameIndex   | `group_id` (`(frame.mode >> 8) & 0xFF`)                          |
+| 0x07    | frameIndex   | `finalizes_payer` (1 if frame is the last `VERIFY` frame, else 0) |
+
+Notes:
+
+- The `status` field (0x04) returns `0` for failure or `1` for success.
+- The `finalizes_payer` field (0x07) returns `1` only for the `VERIFY` frame with the greatest index in the transaction. It returns `0` for every `EXECUTE` frame and for any earlier `VERIFY` frame. A paymaster in a `VERIFY` frame can query `finalizes_payer` against its own frame index (via `TXPARAM(0x0A)`) to confirm that its `APPROVE` call will determine the final payer.
+- Invalid `param` values (not defined in the table above) result in an exceptional halt.
+- Out-of-bounds access for `frameIndex` (`>= len(frames)`) results in an exceptional halt.
 - Attempting to access the return `status` of the current frame or a subsequent frame results in an exceptional halt.
-- `len(data)` field (0x14) returns size 0 value when called on a frame with `VERIFY` set.
+- `len(data)` returns size 0 when called on a frame with `VERIFY` set.
 
 #### `FRAMEDATALOAD` opcode
 
@@ -243,18 +273,24 @@ It places the retrieved data on the stack.
 
 When the `frameIndex` is out-of-bounds, an exceptional halt occurs.
 
-The operation semantics match CALLDATALOAD, returning a word of data from the chosen frame's `data`, starting at the given byte `offset`. When targeting a frame in `VERIFY` mode, the returned data is always zero.
+The operation sematics match CALLDATALOAD, returning a word of data from the chosen
+frame's `data`, starting at the given byte `offset`. When targeting a frame in `VERIFY`
+mode, the returned data is always zero.
 
 #### `FRAMEDATACOPY` opcode
 
-This opcode copies data frame input into the contract's memory. The gas cost matches CALLDATACOPY, i.e. the operation has a fixed cost of 3 and a variable cost that accounts for the memory expansion and copying.
+This opcode copies data frame input into the contract's memory. Its gas cost is calculated
+exactly as for `CALLDATACOPY`, including the fixed cost of 3, the per-word copy cost, and
+the standard EVM memory expansion cost.
 
 It takes four values from the stack: `memOffset`, `dataOffset`, `length` and `frameIndex`.
 No stack output value is produced.
 
 When the `frameIndex` is out-of-bounds, an exceptional halt occurs.
 
-The operation semantics match CALLDATACOPY, copying `length` bytes from the chosen frame's `data`, starting at the given byte `dataOffset`, into a memory region starting at `memOffset`. When targeting a frame in `VERIFY` mode, no data is copied.
+The operation sematics match CALLDATACOPY, copying `length` bytes from the chosen frame's
+`data`, starting at the given byte `dataOffset`, into a memory region starting at
+`memOffset`. When targeting a frame in `VERIFY` mode, no data is copied.
 
 ### Behavior
 
@@ -271,30 +307,29 @@ Initialize with transaction-scoped variables:
 
 Then for each call frame:
 
-2. Execute a call with the specified `mode`, `target`, `value`, `gas_limit`, and `data`.
-   - If `target` is null, set the call target to `tx.sender`.
+1. Let `resolved_target = frame.target if frame.target is not null else tx.sender`, then execute a call with the specified `mode`, `resolved_target`, `gas_limit`, `value`, and `data`.
    - If mode is `EXECUTE` and `sender_approved == true`:
        - Set `caller` as `tx.sender`.
-       - Forward `frame.value` as `msg.value` to the target. Transfer `frame.value` from `tx.sender` to `frame.target`.
    - If mode is `EXECUTE` and `sender_approved == false`:
-       - Set the `caller` to `ENTRY_POINT`.
-       - Forward `frame.value` as `msg.value` to the target. Transfer `frame.value` from `tx.sender` to `frame.target`.
+       - Set `caller` to `ENTRY_POINT`.
    - If mode is `VERIFY`:
-       - Set the `caller` to `ENTRY_POINT`.
-       - Assert `frame.value == 0`.
-   - If `frame.target` has no code, or has an EIP-7702 delegation indicator whose target has no code, execute the logic described in [default code](#default-code).
+       - Set `caller` to `ENTRY_POINT`.
+   - In the top-level frame call, `CALLVALUE` is `frame.value` (`0` for `VERIFY`).
+   - As with an ordinary `CALL`, if the caller does not have sufficient balance to transfer `frame.value`, the frame reverts.
+   - If `resolved_target` has neither code nor an [EIP-7702](./eip-7702.md) delegation indicator, or has an EIP-7702 delegation indicator whose target has empty code, execute the logic described in [default code](#default-code).
+   - Otherwise, if `resolved_target` uses an [EIP-7702](./eip-7702.md) delegation indicator whose target has non-empty code, execute according to [EIP-7702](./eip-7702.md)'s delegated-code semantics.
    - The `ORIGIN` opcode returns frame `caller` throughout all call depths.
    - If a frame's execution reverts:
      - If the frame is part of a multi-frame atomic group, handle according to the atomic group rules below.
      - Otherwise, the frame's state changes are discarded and execution continues to the next frame.
-   - A reverted EXECUTE frame does not halt the transaction. Execution always proceeds to the next frame (or the next frame after a reverted group). Only a VERIFY frame failing to call APPROVE makes the transaction invalid.
-3. If frame has mode `VERIFY` and the frame did not successfully call `APPROVE`, the transaction is invalid.
+   - A reverted `EXECUTE` frame does not halt the transaction. Execution always proceeds to the next frame (or the next frame after a reverted group). Only a `VERIFY` frame failing to call `APPROVE` makes the transaction invalid.
+2. If frame has mode `VERIFY` and the frame did not successfully call `APPROVE`, the transaction is invalid.
 
-After the last VERIFY frame completes, increment the sender's nonce and collect the total gas cost from `payer`. If `payer` has insufficient balance, the transaction is invalid.
+After the last `VERIFY` frame completes successfully, the protocol increments `tx.sender`'s nonce and collects the transaction's maximum cost from `payer`. If `payer` has insufficient balance, the whole transaction is invalid.
 
 #### Atomic Groups
 
-Contiguous EXECUTE frames with the same group ID form an **atomic group**. Within a group, if any frame reverts, all preceding frames in the group are also reverted and all subsequent frames in the group are skipped. Frames in the same group must be adjacent — non-contiguous groups are invalid. A frame whose group ID appears only once in the transaction is a single-frame group and executes independently.
+Contiguous `EXECUTE` frames with the same group ID form an **atomic group**. Within a group, if any frame reverts, all preceding frames in the group are also reverted and all subsequent frames in the group are skipped. Frames in the same group must be adjacent — non-contiguous groups are invalid. A single-frame group — any frame whose group ID does not match either adjacent `EXECUTE` frame — executes independently.
 
 More precisely, execution of an atomic group proceeds as follows:
 
@@ -314,39 +349,43 @@ For example, given frames:
 | 3     | EXECUTE | 2        |
 | 4     | EXECUTE | 3        |
 
-Frames 0-1 form one atomic group and frames 2-3 form another. Frame 4 is the only frame with group ID 3, so it executes independently. If frame 3 reverts, the state changes from frames 2 and 3 are discarded. Frames 0-1 and frame 4 are unaffected.
+Frames 0-1 form one atomic group, frames 2-3 form another, and frame 4 is a single-frame group. If frame 3 reverts, the state changes from frames 2 and 3 are discarded. Frames 0-1 and frame 4 are unaffected.
 
-After executing all frames, verify that `sender_approved == true` and `payer` has sufficient balance. If not, the whole transaction is invalid. Refund any unused gas to `payer`.
+After executing all frames, refund any unused gas to `payer` and return it to the block gas pool.
 
 Note:
 
-- It is implied by the handling that the sender must approve the transaction *before* a non-sender payer can approve, and that once `sender_approved` becomes `true` it cannot be reverted.
+- It is implied by the handling that the sender must approve the transaction *before* any non-sender payer can approve, and that once `sender_approved` becomes `true` it cannot be reverted.
 
 #### Default code
 
-When a frame targets an account with no code, or an account with an EIP-7702 delegation indicator whose target has no code, the account is treated as if it has "default code." This includes accounts that previously had a 7702 delegation which was cleared (delegated to `address(0)`, which resets the code to empty). Clients are free to implement default code however they want, so long as it matches the behavior specified here.
+When a frame targets an account with no code, or an account with an [EIP-7702](./eip-7702.md) delegation indicator whose target has empty code, the account is treated as if it has "default code." This includes accounts that previously had a 7702 delegation which was cleared (delegated to `address(0)`, which resets the code to empty). Accounts with non-empty code, including 7702-delegated accounts whose delegation target has non-empty code, do not use the default code path. Clients are free to implement the default code however they want, so long as it corresponds to the behavior specified here.
 
-- Retrieve the `mode` with `TXPARAMLOAD`.
-- If `mode` is `VERIFY`:
-  - If `frame.target != tx.sender`, revert.
+- Let `resolved_target = frame.target if frame.target is not null else tx.sender`.
+- Retrieve the current frame's `mode` with `FRAMEPARAM`.
+- If `mode & 0x1` is `VERIFY`:
+  - If `resolved_target != tx.sender`, revert.
   - Read the first byte of `frame.data` as `signature_type`.
   - If `signature_type` is:
     - `0x00` (ECDSA):
       - Read the rest of `frame.data` as `(v, r, s)`.
-      - If `frame.target != ecrecover(sig_hash, v, r, s)`, where `sig_hash = compute_sig_hash(tx)`, revert.
+      - If `s > secp256k1n / 2`, revert.
+      - Let `recovered = ecrecover(sig_hash, v, r, s)`, where `sig_hash = compute_sig_hash(tx)`.
+      - If `recovered == address(0)`, revert.
+      - If `resolved_target != recovered`, revert.
     - Otherwise revert.
   - Call `APPROVE`.
-- If `mode` is `EXECUTE`:
-  - Execute the call normally: `call(target=frame.target, value=frame.value, data=frame.data)` with `msg.sender = tx.sender` (if sender approved) or `msg.sender = ENTRY_POINT` (if not).
-  - This is identical to the smart account behavior — no special encoding is needed.
+- If `mode & 0x1` is `EXECUTE`:
+  - Execute the call normally against `resolved_target` with `msg.value = frame.value` and calldata `frame.data`. The caller is `tx.sender` if sender-approved, otherwise `ENTRY_POINT`.
+  - This is identical to the smart-account behavior — no special encoding is needed.
 
 ##### Reserved signature types
 
-Only ECDSA (`0x00`) is defined by this spec. Signature types `0x01`–`0xff` are reserved for future use by companion EIPs (e.g., key delegation, post-quantum schemes, P256). EOAs that need non-ECDSA signing before such extensions exist can set account code and use smart account VERIFY.
+Only ECDSA (`0x00`) is defined by this spec. Signature types `0x01`–`0xff` are reserved for future use by companion EIPs (e.g., key delegation, post-quantum schemes, P256). EOAs that need non-ECDSA signing before such extensions exist can set account code and use smart account `VERIFY`.
 
 Notes:
 
-- EOA EXECUTE frames use the same semantics as smart account EXECUTE frames. The `value` field on the frame handles ETH transfers at the protocol level. No RLP subcall encoding is required.
+- EOA `EXECUTE` frames use the same semantics as smart account `EXECUTE` frames. The `value` field on the frame handles ETH transfers at the protocol level. No RLP subcall encoding is required.
 
 Here's the logic above implemented in Python:
 
@@ -355,11 +394,15 @@ VERIFY  = 0
 EXECUTE = 1
 
 ECDSA = 0x00
+SECP256K1N_DIV_2 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
 
 def default_code(frame, tx):
     mode = frame.mode & 0x1
+    resolved_target = frame.target if frame.target is not None else tx.sender
 
     if mode == VERIFY:
+        if resolved_target != tx.sender:
+            revert()
         signature_type = frame.data[0]
         sig_hash       = compute_sig_hash(tx)
 
@@ -369,7 +412,13 @@ def default_code(frame, tx):
             v = frame.data[1]
             r = frame.data[2:34]
             s = frame.data[34:66]
-            if frame.target != ecrecover(sig_hash, v, r, s):
+            # Reject high-s signatures so each authorization has a single canonical encoding.
+            if int.from_bytes(s, "big") > SECP256K1N_DIV_2:
+                revert()
+            recovered = ecrecover(sig_hash, v, r, s)
+            if recovered == bytes(20):
+                revert()
+            if resolved_target != recovered:
                 revert()
 
         else:
@@ -382,9 +431,9 @@ def default_code(frame, tx):
         # This is the same as smart account behavior.
         result = evm_call(
             caller=tx.sender if sender_approved else ENTRY_POINT,
-            to=frame.target,
+            to=resolved_target,
             value=frame.value,
-            data=frame.data
+            data=frame.data,
         )
         if result.reverted:
             revert()
@@ -405,7 +454,7 @@ A few cross-frame interactions to note:
 The total gas limit of the transaction is:
 
 ```
-tx_gas_limit = FRAME_TX_INTRINSIC_COST + calldata_cost(rlp(tx.frames)) + sum(frame.gas_limit for all frames)
+tx_gas_limit = FRAME_TX_INTRINSIC_COST + len(tx.frames) * FRAME_TX_PER_FRAME_COST + calldata_cost(rlp(tx.frames)) + sum(frame.gas_limit for all frames)
 ```
 
 Where `calldata_cost` is calculated per standard EVM rules (4 gas per zero byte, 16 gas per non-zero byte).
@@ -419,13 +468,15 @@ blob_fees = len(blob_versioned_hashes) * GAS_PER_BLOB * blob_base_fee
 
 The `effective_gas_price` is calculated per EIP-1559 and `blob_fees` is calculated as per EIP-4844.
 
+Any `frame.value` transferred by `EXECUTE` frames is separate from `tx_fee` and follows ordinary `CALL` value-transfer semantics. The gas cost of sending `frame.value` is the same as for any ordinary `CALL` frame.
+
 Each frame has its own `gas_limit` allocation. Unused gas from a frame is **not** available to subsequent frames. After all frames execute, the gas refund is calculated as:
 
 ```
 refund = sum(frame.gas_limit for all frames) - total_gas_used
 ```
 
-This refund is returned to `payer` (the last address that called `APPROVE` from a non-sender VERIFY frame, or `tx.sender` if only the sender approved) and added back to the block gas pool. *Note: This refund mechanism is separate from EIP-3529 storage refunds.*
+This refund is returned to `payer` (the last address that called `APPROVE` from a non-sender `VERIFY` frame, or `tx.sender` if only the sender approved) and added back to the block gas pool. *Note: This refund mechanism is separate from EIP-3529 storage refunds.*
 
 ### Mempool
 
@@ -442,9 +493,9 @@ This policy is inspired by [ERC-7562](./eip-7562.md), but removes staking and re
 
 #### Validation Prefix
 
-The **validation prefix** of a frame transaction is the shortest prefix of frames whose successful execution causes `payer` to be set (via APPROVE from a non-sender, or the sender approving as both sender and payer).
+The **validation prefix** of a frame transaction is the shortest prefix of frames whose successful execution finalizes the transaction's `payer` (i.e., after which no further `VERIFY` frame can overwrite `payer`).
 
-Public mempool rules apply only to the validation prefix. Once the validation prefix completes, subsequent frames are outside public mempool validation and may be arbitrary.
+Public mempool rules apply only to the validation prefix. Once the validation prefix completes, subsequent frames are outside public mempool validation and may be arbitrary. In particular, `user_op` and `post_op` occur after payment approval and are therefore not subject to the public mempool restrictions below.
 
 #### Policy Summary
 
@@ -452,7 +503,7 @@ A frame transaction is eligible for public mempool propagation only if its valid
 
 1. transaction fields, including the canonical signature hash,
 2. the sender's nonce, code, and storage,
-3. a known deterministic deployer contract, if a deployment frame is present,
+3. the [EIP-7997](./eip-7997.md) deterministic factory predeploy, if a deployment frame is present,
 4. if a paymaster frame is present, either a canonical paymaster instance together with explicit paymaster balance reservation, or a non-canonical paymaster being used by less than `MAX_PENDING_TXS_USING_NON_CANONICAL_PAYMASTER` pending transactions,
 5. the code of any other existing non-delegated contracts reached during validation via `CALL*` or `EXTCODE*`, provided the resulting trace does not access disallowed mutable state.
 
@@ -464,16 +515,16 @@ While the frames are designed to be generic, we refine some frame modes for the 
 
 | Name  | Mode  | Description  |
 |---|---|---|
-| `self_verify`   | VERIFY  | Validates the transaction; sender calls APPROVE (approves execution + payment) |
-| `deploy`  | EXECUTE | Deploys a new smart account using a known deterministic deployer (before sender approval) |
-| `only_verify`  | VERIFY  | Validates the transaction; sender calls APPROVE (execution only, expects separate payer) |
-| `pay`  | VERIFY | Non-sender calls APPROVE (approves payment) |
-| `user_op` | EXECUTE | Executes the intended user operation (after sender approval) |
-| `post_op` | EXECUTE | Executes an optional post-op action (after sender approval) |
+| `self_verify`  | VERIFY  | Sender calls APPROVE; no further VERIFY frame follows, so `payer = tx.sender` |
+| `deploy`       | EXECUTE | Deploys a new smart account using the [EIP-7997](./eip-7997.md) deterministic factory predeploy (before sender approval) |
+| `only_verify`  | VERIFY  | Sender calls APPROVE; a subsequent `pay` frame overwrites `payer` |
+| `pay`          | VERIFY  | Non-sender calls APPROVE; sets `payer` to the non-sender |
+| `user_op`      | EXECUTE | Executes the intended user operation (after sender approval) |
+| `post_op`      | EXECUTE | Executes an optional post-op action (after sender approval) |
 
 #### Public Mempool-recognized Validation Prefixes
 
-The public mempool recognizes four validation prefixes. Structural rules are enforced only up to and including the frame that completes the validation.
+The public mempool recognizes four validation prefixes. Structural rules are enforced only up to and including the frame that finalizes `payer`.
 
 ##### Self Relay
 
@@ -518,9 +569,9 @@ Frames after these prefixes are outside public mempool validation. For example, 
 To be accepted into the public mempool, a frame transaction must satisfy the following:
 
 1. Its validation prefix must match one of the four recognized prefixes above.
-2. If present, `deploy` must be the first frame. This implies there can be at most one `deploy` frame in the validation prefix. A `deploy` frame is an EXECUTE frame before sender approval, so its caller is ENTRY_POINT.
-3. `self_verify` and `only_verify` must execute in `VERIFY` mode, target `tx.sender` (either explicitly or via a null target), and must successfully call `APPROVE`.
-4. `pay` must execute in `VERIFY` mode and successfully call `APPROVE`.
+2. If present, `deploy` must be the first frame. This implies there can be at most one `deploy` frame in the validation prefix. A `deploy` frame is an `EXECUTE` frame before sender approval, so its caller is `ENTRY_POINT`.
+3. `self_verify` and `only_verify` must execute in `VERIFY` mode, target `tx.sender` (either explicitly or via a null target), and must successfully call `APPROVE` as the sender.
+4. `pay` must execute in `VERIFY` mode, target an address other than `tx.sender`, and must successfully call `APPROVE`.
 5. The sum of `gas_limit` values across the validation prefix must not exceed `MAX_VERIFY_GAS`.
 6. Nodes should stop simulation immediately once the validation prefix completes.
 
@@ -543,7 +594,7 @@ A public mempool node must simulate the validation prefix and reject the transac
 
 ##### Banned Opcodes
 
-The following opcodes are banned during the validation prefix, with a few caveats:
+For `VERIFY` frames, the usual `STATICCALL` restrictions apply except for the protocol-defined effects of `APPROVE`. In addition, the following opcodes are banned during the validation prefix, with a few caveats:
 
 - ORIGIN (0x32)
 - GASPRICE (0x3A)
@@ -560,7 +611,7 @@ The following opcodes are banned during the validation prefix, with a few caveat
     - Except when followed immediately by a `*CALL` instruction. This is the standard method of passing gas to a child call and does not create an additional public mempool dependency.
 - CREATE (0xF0)
 - CREATE2 (0xF5)
-    - Except inside the first `deploy` frame when targeting a known deterministic deployer.
+    - Except inside the first `deploy` frame when targeting the [EIP-7997](./eip-7997.md) deterministic factory predeploy.
 - INVALID (0xFE)
 - SELFDESTRUCT (0xFF)
 - BALANCE (0x31)
@@ -588,6 +639,8 @@ We address this conflict in two ways:
 
 The canonical paymaster is not a singleton deployment. Many instances may be deployed. For public mempool purposes, a paymaster instance is considered canonical if and only if the runtime code at the `pay` frame target exactly matches the canonical paymaster implementation.
 
+The canonical paymaster in this draft authorizes with a single secp256k1 signer via `ecrecover`, does not support contract-signature schemes, and may change in later specifications, in which case a new canonical implementation version would be required.
+
 Because the canonical paymaster implementation is explicitly standardized to be safe for public mempool use, nodes do not need to apply the generic validation trace and opcode rules to that `pay` frame. Instead, they identify it by runtime code match and apply the paymaster-specific accounting and revalidation rules in this section.
 
 A transaction using a paymaster is eligible for public mempool propagation only if the `pay` frame targets a canonical paymaster instance and the node can reserve the maximum transaction cost against that paymaster.
@@ -600,13 +653,13 @@ available_paymaster_balance = state.balance(paymaster) - reserved_pending_cost(p
 
 Where `pending_withdrawal_amount(paymaster)` is the currently pending delayed withdrawal amount of the canonical paymaster instance, or zero if no delayed withdrawal is pending.
 
-A node must reject a paymaster transaction if `available_paymaster_balance` is less than the transaction's maximum cost (`TXPARAM(0x06, 0)`).
+A node must reject a paymaster transaction if `available_paymaster_balance` is less than the transaction's maximum cost (`TXPARAM(0x06)`).
 
-On admission, the node increments `reserved_pending_cost(paymaster)` by the transaction's maximum cost (`TXPARAM(0x06, 0)`). On eviction, replacement, inclusion, or reorg removal, the node decrements it accordingly.
+On admission, the node increments `reserved_pending_cost(paymaster)` by the transaction's maximum cost (`TXPARAM(0x06)`). On eviction, replacement, inclusion, or reorg removal, the node decrements it accordingly.
 
 ##### Non-canonical paymaster
 
-For non-canonical paymasters, `pending_withdrawal_amount` is not meaningful since they may not support timelocked withdrawals. Instead, we keep the mempool safe by enforcing that each non-canonical paymaster can only be used with no more than `MAX_PENDING_TXS_USING_NON_CANONICAL_PAYMASTER` pending transactions.
+For non-canonical paymasters, `pending_withdrawal_amount` is not meaningful since they may not support timelocked withdrawals.  Instead, we keep the mempool safe by enforcing that each non-canonical paymaster can only be used with no more than `MAX_PENDING_TXS_USING_NON_CANONICAL_PAYMASTER` pending transactions.
 
 Therefore we perform two checks:
 
@@ -617,6 +670,8 @@ available_paymaster_balance = state.balance(paymaster) - reserved_pending_cost(p
 ```
 
 - The number of pending transactions in the mempool that uses this paymaster must be less than `MAX_PENDING_TXS_USING_NON_CANONICAL_PAYMASTER`.
+
+[See here for rationale](#non-canonical-paymasters-in-the-mempool) for enabling non-canonical paymasters in the mempool.
 
 #### Acceptance Algorithm
 
@@ -636,49 +691,71 @@ When a new canonical block is accepted, the node removes any included frame tran
 
 ### Canonical signature hash
 
-The canonical signature hash is provided in `TXPARAMLOAD` to simplify the development of smart accounts.
+The canonical signature hash is provided in `TXPARAM` to simplify the development of smart accounts.
 
 Computing the signature hash in EVM is complicated and expensive. While using the canonical signature hash is not mandatory, it is strongly recommended. Creating a bespoke signature requires precise commitment to the underlying transaction data. Without this, it's possible that some elements can be manipulated in-the-air while the transaction is pending and have unexpected effects. This is known as transaction malleability. Using the canonical signature hash avoids malleability of the frames other than `VERIFY`.
 
-The `frame.data` of `VERIFY` frames is elided from the signature hash. This is done for two reasons:
+The `frame.data` of `VERIFY` frames is elided from the signature hash. This is done for three reasons:
 
 1. It contains the signature so by definition it cannot be part of the signature hash.
 2. In the future it may be desired to aggregate the cryptographic operations for data and compute efficiency reasons. If the data was introspectable, it would not be possible to aggregate the verify frames in the future.
-3. For gas sponsoring workflows, we also recommend using a `VERIFY` frame to approve the gas payment. Here, the input data to the sponsor is intentionally left malleable so it can be added onto the transaction after the `sender` has made its signature. Notably, the `frame.target` of `VERIFY` frames is covered by the signature hash, i.e. the `sender` chooses the sponsor address explicitly.
+3. For gas sponsoring workflows, we also recommend using a `VERIFY` frame to approve the gas payment. Here, the input data to the sponsor is intentionally left malleable so it can be added onto the transaction after the `sender` has made its signature. Notably, the raw `frame.target` field of `VERIFY` frames is covered by the signature hash, i.e. the `sender` chooses the sponsor address explicitly.
+
+Implementations MUST NOT treat `VERIFY` frame `data` as sender-authenticated by the canonical signature hash. Any verifier or paymaster that depends on its input data, including sponsor parameters, exchange rates, fee terms, or custom account context, MUST authenticate that data independently. Replacing or mutating `VERIFY` frame `data` does not change the canonical signature hash.
+
+By contrast, non-`VERIFY` frame metadata, including an `EXECUTE` frame's `value`, remains covered by the canonical signature hash.
+
+Verification logic MUST NOT assign policy meaning to signature encodings or adjacent `VERIFY` frame data unless that meaning is independently authenticated.
 
 ### `APPROVE` calling convention
 
-`APPROVE` terminates the executing frame successfully like `RETURN`, but it actually updates the transaction scoped approval state during execution. It is still required that only the sender can toggle the `sender_approved` to `true`. Only the `frame.target` can call `APPROVE` generally, because it allows the transaction pool and other frames to better reason about `VERIFY` mode frames.
+`APPROVE` terminates the executing frame successfully like `RETURN`, but it actually updates the transaction-scoped approval state during execution. Only the frame's resolved target can call `APPROVE` generally, because it allows the transaction pool and other frames to better reason about `VERIFY` mode frames.
 
-APPROVE takes no scope operand. The caller's identity determines the semantics: if the sender calls APPROVE, it approves both execution and payment. If a non-sender calls APPROVE, it approves payment (overwriting the payer). This covers self-pay (sender approves everything) and sponsored (sender approves execution, paymaster approves payment) without explicit scope selection.
+`APPROVE` takes no scope operand. The caller's identity determines the semantics: if the sender calls `APPROVE`, it approves execution and sets `payer = tx.sender`. If a non-sender calls `APPROVE`, it overwrites `payer` to the caller. This covers self-pay (sender approves everything) and sponsored (sender approves, then paymaster approves) without explicit scope selection. Nonce increment and gas collection happen after the last `VERIFY` frame in the transaction completes, so the final `payer` is the last non-sender approver, or `tx.sender` if no non-sender approves.
 
-APPROVE is restricted to VERIFY frames. VERIFY frames validate, EXECUTE frames execute, and the protocol enforces this. Approval state can't be mutated as a side effect of execution, so the approval flow can be determined from the transaction's VERIFY frames alone.
+`APPROVE` is restricted to `VERIFY` frames. `VERIFY` frames validate, `EXECUTE` frames execute, and the protocol enforces this separation at the opcode level rather than relying on convention. Approval state can't be mutated as a side effect of execution, so the approval flow can be determined from the transaction's `VERIFY` frames alone.
+
+### `finalizes_payer` exposure
+
+Because `payer` is determined by the last `VERIFY` frame and earlier approvers can be silently overwritten, a paymaster that approves without checking its position is vulnerable to a tail-appended `VERIFY` frame that redirects payment elsewhere. `FRAMEPARAM(0x07)` surfaces whether a given frame is the final `VERIFY` frame, computable statically from the frame list. A paymaster verifier can guard its `APPROVE` with `FRAMEPARAM(0x07, TXPARAM(0x0A)) == 1` to refuse to sponsor any transaction where another `VERIFY` frame could still overwrite `payer`.
 
 ### Frame modes
 
-Frames are either validating (VERIFY) or executing (EXECUTE). The caller of an EXECUTE frame is determined by the approval state: before sender approval, the caller is ENTRY_POINT (used for deployment and setup); after sender approval, the caller is tx.sender. This keeps the mode field to a single bit and reduces frame construction to one question: "is this frame validating or executing?"
+Frames are either validating (`VERIFY`) or executing (`EXECUTE`). The caller of an `EXECUTE` frame is determined by the approval state: before sender approval, the caller is `ENTRY_POINT` (used for deployment and setup); after sender approval, the caller is `tx.sender`. This keeps the mode distinction to a single bit and reduces frame construction to one question: "is this frame validating or executing?"
 
-### Value in frame
+### Per-frame value
 
-Every other Ethereum transaction type has a value field. Frames are the unit of execution in 8141, and ETH transfers are the most basic Ethereum operation. Including value in the frame structure means ETH transfers work at the protocol level without account-specific workarounds. Both EOAs and smart accounts use the same `(target, value, data)` semantics on EXECUTE frames.
+A design goal of the frame transaction is to provide a good experience out-of-the-box for users and to reduce the threat surface of smart contract wallets. Like batching, sending native value is a part of achieving that.
+
+Restricting non-zero `value` to `EXECUTE` frames keeps `VERIFY` frames side-effect-free with respect to ETH transfer semantics, preserves the intended `STATICCALL`-like behavior of `VERIFY`, and avoids requiring the protocol-defined `ENTRY_POINT` caller to fund top-level ETH transfers.
+
+Both EOAs and smart accounts use the same `(target, value, data)` semantics on `EXECUTE` frames. No RLP subcall wrapper is required for EOA multi-operation flows — batching is expressed by multiple `EXECUTE` frames, optionally grouped atomically.
 
 ### Atomic groups
 
-Frames that should succeed or fail together share a group ID. All frames in a group must be contiguous EXECUTE frames. If any frame in a group reverts, the entire group is reverted. A frame whose group ID is unique in the transaction executes independently.
+Frames that should succeed or fail together share a group ID. All frames in a group must be contiguous `EXECUTE` frames. If any frame in a group reverts, the entire group is reverted. A frame whose group ID does not match either adjacent `EXECUTE` frame executes independently.
 
-Group IDs are a label on each frame rather than a forward reference. An ERC-20 paymaster pattern with multiple atomic groups (approve+swap, refund) just assigns each group its own ID.
+Group IDs are a label on each frame rather than a forward reference. An ERC-20 paymaster pattern with multiple atomic groups (approve+swap, refund) just assigns each group its own ID. This also avoids the off-by-one construction trap where the atomic flag is set on all-but-last, a frequent source of bugs in forward-referencing designs.
+
+Group ID `0` is not special. A sequence of `EXECUTE` frames that all carry the default group ID `0` is a single atomic group — the safer default, because a user who serializes `[mode: EXECUTE]` for multiple frames without explicitly thinking about atomicity gets all-or-nothing behavior rather than silently-independent frames. Users who want independent frames must opt in by assigning distinct group IDs.
+
+### Per-frame cost
+
+Each frame incurs a fixed CALL execution-context overhead (100) plus `G_log` (375) for the receipt sub-entry it produces, giving `FRAME_TX_PER_FRAME_COST = 475`. The execution-context component covers context setup, mode dispatch, and gas accounting at the frame boundary, analogous to the fixed overhead of a CALL. The `G_log` component covers the `[status, gas_used, logs]` receipt sub-entry that each frame adds to the transaction receipt, which must be serialized, hashed into the receipt trie, and proven by ZK-EVM implementations. Cold/warm access costs for the frame's target account are charged within the frame's own `gas_limit` through the normal EVM warm/cold accounting, not through the per-frame cost.
 
 ### Continuation after revert
 
-A reverted EXECUTE frame does not halt the transaction. Single-frame groups revert in isolation and execution moves on. Multi-frame groups revert together, and execution continues after the group. Only a VERIFY frame failing to APPROVE invalidates the transaction.
+A reverted `EXECUTE` frame does not halt the transaction. Single-frame groups revert in isolation and execution moves on. Multi-frame groups revert together, and execution continues after the group. Only a `VERIFY` frame failing to `APPROVE` invalidates the transaction.
 
 This matters for paymaster flows: a post-op frame needs to run even if the user's call reverted, so the paymaster can settle gas accounting. A batch of independent transfers should let each succeed or fail on its own. If you want "stop everything on any failure," put all frames in one group.
 
 ### EOA default code
 
-EOA EXECUTE frames use the same semantics as smart account EXECUTE frames: `target` is the call target, `value` is the ETH amount, `data` is calldata. The only EOA-specific behavior is the VERIFY frame, which verifies an ECDSA signature against the account address.
+EOA `EXECUTE` frames use the same semantics as smart account `EXECUTE` frames: `target` is the call target, `value` is the ETH amount, `data` is calldata. The only EOA-specific behavior is the `VERIFY` frame, which verifies an ECDSA signature against the account address.
 
-Default code handles only ECDSA — the one scheme existing EOAs use. The `signature_type` byte reserves `0x01`–`0xff` for companion EIPs to define additional signing schemes (key delegation, P256, post-quantum, etc.) without changes to this spec. EOAs that need non-ECDSA signing before such extensions exist can set account code via EIP-7702 and use smart account VERIFY.
+Default code also applies when an account has an EIP-7702 delegation whose target has empty code (e.g., a cleared delegation). Without this, an account whose delegation points at an empty target cannot validate frame transactions, because the delegation indicator would otherwise bypass default code while the delegated code is empty — leaving no executable path.
+
+Default code handles only ECDSA — the one scheme existing EOAs use. The `signature_type` byte reserves `0x01`–`0xff` for companion EIPs to define additional signing schemes (key delegation, P256, post-quantum, etc.) without changes to this spec. EOAs that need non-ECDSA signing before such extensions exist can set account code via EIP-7702 and use smart account `VERIFY`.
 
 ### Payer in receipt
 
@@ -694,37 +771,48 @@ The access list was introduced to address a particular backwards compatibility i
 
 Future optimizations based on pre-announcing state elements a transaction will touch will be covered by block level access lists.
 
+### Non-canonical paymasters in the mempool
+
+The primary use case for non-canonical paymasters is to enable users to pay gas with a dedicated "gas account," so that their other accounts can transact without holding any ETH. For example, a user might have a single account that holds some ETH, while other accounts only hold stablecoins and NFTs, and they can transact freely with these other accounts while using the gas account as the paymaster.
+
+Note that users can use any EOA as a paymaster thanks to the [default code](#default-code).
+
 ### Examples
 
 #### Example 1: Simple Transaction
 
-| Frame | Caller         | Target        | Value | Data      | Mode    |
-| ----- | -------------- | ------------- | ----- | --------- | ------- |
-| 0     | ENTRY_POINT    | Null (sender) | 0     | Signature | VERIFY  |
-| 1     | Sender         | Target        | 0     | Call data | EXECUTE |
+| Frame | Caller      | Target        | Value | Data      | Mode    | Group |
+| ----- | ----------- | ------------- | ----- | --------- | ------- | ----- |
+| 0     | ENTRY_POINT | Null (sender) | 0     | Signature | VERIFY  | -     |
+| 1     | Sender      | Target        | 0     | Call data | EXECUTE | 0     |
 
-Frame 0 verifies the signature and calls `APPROVE` to approve execution and payment. Frame 1 executes and exits normally via `RETURN`.
+Frame 0 verifies the signature and calls `APPROVE` (sender caller, so this approves execution and sets `payer = sender`). Frame 1 executes and exits normally via `RETURN`.
+
+The mempool can process this transaction with the following static validation and call:
+
+- Verify that the first frame is a `VERIFY` frame.
+- Verify that the call of frame 0 succeeds, and does not violate the mempool rules (similar to [ERC-7562](./eip-7562.md)).
 
 #### Example 1a: Simple ETH transfer
 
-| Frame | Caller         | Target        | Value  | Data      | Mode    |
-| ----- | -------------- | ------------- | ------ | --------- | ------- |
-| 0     | ENTRY_POINT    | Null (sender) | 0      | Signature | VERIFY  |
-| 1     | Sender         | Recipient     | 1 ETH  | (empty)   | EXECUTE |
+| Frame | Caller      | Target        | Value  | Data      | Mode    | Group |
+| ----- | ----------- | ------------- | ------ | --------- | ------- | ----- |
+| 0     | ENTRY_POINT | Null (sender) | 0      | Signature | VERIFY  | -     |
+| 1     | Sender      | Destination   | Amount | Empty     | EXECUTE | 0     |
 
 An ETH transfer is performed directly via the frame's `value` field. No calldata is needed, and the behavior is identical for EOAs and smart accounts.
 
 #### Example 1b: Simple account deployment
 
-| Frame | Caller       | Target        | Value | Data               | Mode    |
-| ----- | ------------ | ------------- | ----- | ------------------ | ------- |
-| 0     | ENTRY_POINT  | Deployer      | 0     | Initcode, Salt     | EXECUTE |
-| 1     | ENTRY_POINT  | Null (sender) | 0     | Signature          | VERIFY  |
-| 2     | Sender       | Recipient     | 1 ETH | (empty)            | EXECUTE |
+| Frame | Caller       | Target        | Value  | Data           | Mode    | Group |
+| ----- | ------------ | ------------- | ------ | -------------- | ------- | ----- |
+| 0     | ENTRY_POINT  | Deployer      | 0      | Initcode, Salt | EXECUTE | 0     |
+| 1     | ENTRY_POINT  | Null (sender) | 0      | Signature      | VERIFY  | -     |
+| 2     | Sender       | Destination   | Amount | Empty          | EXECUTE | 0     |
 
 This example illustrates the initial deployment flow for a smart account at the `sender` address. Since the address needs to have code in order to validate the transaction, the transaction must deploy the code before verification.
 
-The first frame is an EXECUTE frame before sender approval, so its caller is ENTRY_POINT. It calls a deployer contract, like EIP-7997. The deployer determines the address in a deterministic way, such as by hashing the initcode and salt.
+The first frame is an `EXECUTE` frame before sender approval, so its caller is `ENTRY_POINT`. It calls the [EIP-7997](./eip-7997.md) deterministic factory predeploy. The deployer determines the address in a deterministic way from the salt and initcode. However, since the transaction sender is not authenticated at this point, the user must choose an initcode which is safe to deploy by anyone.
 
 #### Example 2: Atomic Approve + Swap
 
@@ -734,37 +822,41 @@ The first frame is an EXECUTE frame before sender approval, so its caller is ENT
 | 1     | Sender      | ERC-20        | 0     | approve(DEX, amount)  | EXECUTE | 1     |
 | 2     | Sender      | DEX           | 0     | swap(...)             | EXECUTE | 1     |
 
-Frame 0 verifies the signature and calls `APPROVE`. Frames 1 and 2 are in group 1: if the swap in frame 2 reverts, the ERC-20 approval from frame 1 is also reverted, preventing the account from being left with a dangling approval.
+Frame 0 verifies the signature and calls `APPROVE`. Frames 1 and 2 share group ID `1`: if the swap in frame 2 reverts, the ERC-20 approval from frame 1 is also reverted, preventing the account from being left with a dangling approval.
 
 #### Example 3: Sponsored Transaction (Fee Payment in ERC-20)
 
-| Frame | Caller      | Target        | Value | Data                   | Mode    |
-| ----- | ----------- | ------------- | ----- | ---------------------- | ------- |
-| 0     | ENTRY_POINT | Null (sender) | 0     | Signature              | VERIFY  |
-| 1     | ENTRY_POINT | Sponsor       | 0     | Sponsor data           | VERIFY  |
-| 2     | Sender      | ERC-20        | 0     | transfer(Sponsor,fees) | EXECUTE |
-| 3     | Sender      | Target addr   | 0     | Call data              | EXECUTE |
-| 4     | Sender      | Sponsor       | 0     | Post op call           | EXECUTE |
+| Frame | Caller      | Target        | Value | Data                   | Mode    | Group |
+| ----- | ----------- | ------------- | ----- | ---------------------- | ------- | ----- |
+| 0     | ENTRY_POINT | Null (sender) | 0     | Signature              | VERIFY  | -     |
+| 1     | ENTRY_POINT | Sponsor       | 0     | Sponsor data           | VERIFY  | -     |
+| 2     | Sender      | ERC-20        | 0     | transfer(Sponsor,fees) | EXECUTE | 1     |
+| 3     | Sender      | Target addr   | 0     | Call data              | EXECUTE | 2     |
+| 4     | Sender      | Sponsor       | 0     | Post op call           | EXECUTE | 3     |
 
 - Frame 0: Verifies signature and calls `APPROVE` — sender is the caller, so this approves execution and sets `payer = sender`.
-- Frame 1: Sponsor checks that the user has enough ERC-20 tokens and calls `APPROVE` — non-sender caller, so this sets `payer = sponsor`. Nonce incremented, gas collected from sponsor.
+- Frame 1: Sponsor checks that the user has enough ERC-20 tokens and calls `APPROVE` — non-sender caller, so this sets `payer = sponsor`. After this last `VERIFY` frame, the protocol increments the sender's nonce and collects gas from the sponsor.
 - Frame 2: Sends tokens to sponsor.
 - Frame 3: User's intended call.
 - Frame 4 (optional): Check unpaid gas, refund tokens, possibly convert tokens to ETH on an AMM.
 
+Frames 2, 3, and 4 carry distinct group IDs so they execute independently. This preserves the sponsor payment in frame 2 and the post-op in frame 4 even if the user's call in frame 3 reverts.
+
 #### Example 4: EOA paying gas in ERC-20s
 
-| Frame | Caller      | Target        | Value | Data                   | Mode    |
-| ----- | ----------- | ------------- | ----- | ---------------------- | ------- |
-| 0     | ENTRY_POINT | Null(sender)  | 0     | (0, v, r, s)          | VERIFY  |
-| 1     | ENTRY_POINT | Sponsor       | 0     | Sponsor signature      | VERIFY  |
-| 2     | Sender      | ERC-20        | 0     | transfer(Sponsor,fees) | EXECUTE |
-| 3     | Sender      | Target addr   | 0     | Call data              | EXECUTE |
+| Frame | Caller      | Target        | Value | Data                   | Mode    | Group |
+| ----- | ----------- | ------------- | ----- | ---------------------- | ------- | ----- |
+| 0     | ENTRY_POINT | Null(sender)  | 0     | (0, v, r, s)           | VERIFY  | -     |
+| 1     | ENTRY_POINT | Sponsor       | 0     | Sponsor signature      | VERIFY  | -     |
+| 2     | Sender      | ERC-20        | 0     | transfer(Sponsor,fees) | EXECUTE | 1     |
+| 3     | Sender      | Target addr   | 0     | Call data              | EXECUTE | 2     |
 
 - Frame 0: EOA default code verifies ECDSA signature and calls `APPROVE` — approves execution, sets `payer = sender`.
 - Frame 1: Sponsor calls `APPROVE` — sets `payer = sponsor`.
 - Frame 2: Sends tokens to sponsor.
 - Frame 3: User's intended call.
+
+Frames 2 and 3 carry distinct group IDs so the sponsor payment in frame 2 survives a revert in the user's call in frame 3.
 
 ### Data Efficiency
 
@@ -781,31 +873,31 @@ Frame 0 verifies the signature and calls `APPROVE`. Frames 1 and 2 are in group 
 | Max fee per blob gas              | 1     |
 | Blob versioned hashes (empty)     | 1     |
 | Frames wrapper                    | 1     |
-| Sender validation frame: target   | 1     |
-| Sender validation frame: value    | 1     |
-| Sender validation frame: gas      | 2     |
-| Sender validation frame: data     | 65    |
 | Sender validation frame: mode     | 1     |
-| Execution frame: target           | 20    |
-| Execution frame: value            | 5     |
-| Execution frame: gas              | 1     |
-| Execution frame: data             | 0     |
+| Sender validation frame: target   | 1     |
+| Sender validation frame: gas      | 2     |
+| Sender validation frame: value    | 1     |
+| Sender validation frame: data     | 65    |
 | Execution frame: mode             | 1     |
+| Execution frame: target           | 20    |
+| Execution frame: gas              | 1     |
+| Execution frame: value            | 5     |
+| Execution frame: data             | 0     |
 | **Total**                         | 134   |
 
-Notes: Nonce assumes < 65536 prior sends. Fees assume < 1099 gwei. Validation frame target is 1 byte because target is `tx.sender`. Validation frame value is 1 byte (0). Validation gas assumes <= 65,536 gas. Validation data is 65 bytes for ECDSA signature. Execution frame target is full 20-byte address. Execution frame value is 5 bytes for ETH amount. Blob fields assume no blobs (empty list, zero max fee).
+Notes: Nonce assumes < 65536 prior sends. Fees assume < 1099 gwei. Validation frame target is 1 byte because target is `tx.sender`. Validation gas assumes <= 65,536 gas. Validation frame value is zero. Execution frame target is encoded directly as the destination address. Execution frame value assumes a compact 5-byte encoding. The execution frame data is empty for a plain ETH transfer. Validation data is 65 bytes for an ECDSA signature. Blob fields assume no blobs (empty list, zero max fee).
 
-The value field adds 1 byte per frame for zero-value calls (the common case — RLP encodes 0 as a single byte). For ETH transfers, this replaces the calldata that would otherwise encode the value, so there is no net overhead.
+Dropping the `flags` byte from each frame saves one byte per frame relative to upstream.
 
 **First transaction from an account (add deployment frame):**
 
 | Field                      | Bytes |
 | -------------------------- | ----- |
-| Deployment frame: target   | 20    |
-| Deployment frame: value    | 1     |
-| Deployment frame: gas      | 3     |
-| Deployment frame: data     | 100   |
 | Deployment frame: mode     | 1     |
+| Deployment frame: target   | 20    |
+| Deployment frame: gas      | 3     |
+| Deployment frame: value    | 1     |
+| Deployment frame: data     | 100   |
 | **Total additional**       | 125   |
 
 Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0).
@@ -814,22 +906,22 @@ Notes: Gas assumes cost < 2^24. Calldata assumes small proxy. Value is 1 byte (0
 
 | Field                                | Bytes |
 | ------------------------------------ | ----- |
-| Sponsor validation frame: target   | 20    |
-| Sponsor validation frame: value    | 1     |
-| Sponsor validation frame: gas      | 3     |
-| Sponsor validation frame: calldata | 0     |
-| Sponsor validation frame: mode     | 1     |
-| Send to sponsor frame: target      | 20    |
-| Send to sponsor frame: value       | 1     |
-| Send to sponsor frame: gas         | 3     |
-| Send to sponsor frame: calldata    | 68    |
-| Send to sponsor frame: mode        | 1     |
-| Sponsor post op frame: target      | 20    |
-| Sponsor post op frame: value       | 1     |
-| Sponsor post op frame: gas         | 3     |
-| Sponsor post op frame: calldata    | 0     |
-| Sponsor post op frame: mode        | 2     |
-| **Total additional**               | 145   |
+| Sponsor validation frame: mode       | 1     |
+| Sponsor validation frame: target     | 20    |
+| Sponsor validation frame: gas        | 3     |
+| Sponsor validation frame: value      | 1     |
+| Sponsor validation frame: calldata   | 0     |
+| Send to sponsor frame: mode          | 1     |
+| Send to sponsor frame: target        | 20    |
+| Send to sponsor frame: gas           | 3     |
+| Send to sponsor frame: value         | 1     |
+| Send to sponsor frame: calldata      | 68    |
+| Sponsor post op frame: mode          | 1     |
+| Sponsor post op frame: target        | 20    |
+| Sponsor post op frame: gas           | 3     |
+| Sponsor post op frame: value         | 1     |
+| Sponsor post op frame: calldata      | 0     |
+| **Total additional**                 | 143   |
 
 Notes: Sponsor can read info from other fields. ERC-20 transfer call is 68 bytes.
 
@@ -860,13 +952,25 @@ function validateTransaction() external {
 
 Such transactions are valid when submitted but become invalid once the deadline passes, without any on-chain action required from the attacker.
 
+#### Deploy Frame Front-Running
+
+If a transaction uses a `deploy` frame, that frame executes before the sender is authenticated. An observer can front-run the same deterministic deployment and cause the `deploy` frame to fail because code is already present at `tx.sender`. Accordingly, initcode used with `deploy` frames must be safe to deploy by any party, and wallets should expect resubmission without the `deploy` frame once deployment has already occurred.
+
+#### Explicit Sender State-Read Amplification
+
+Because `tx.sender` is explicit in the transaction envelope, an attacker can submit many invalid frame transactions that name arbitrary sender addresses and force nodes to read sender state, including the nonce check required before execution. Public mempool implementations should therefore perform all available structural and stateless checks before sender-state access and should consider peer-level rate limiting or other DoS mitigations for repeated invalid transactions that vary `tx.sender`.
+
+#### Cross-Frame Data Visibility During Validation
+
+`FRAMEPARAM`, `FRAMEDATALOAD`, and `FRAMEDATACOPY` allow validation code to inspect other frames, including later `EXECUTE` frames and their `value`s. As a result, paymasters and other `VERIFY` frames can observe user operation parameters before approval and may condition their behavior on that information. Users should therefore treat non-`VERIFY` frame parameters and data as visible to validation logic and should not rely on untrusted paymasters or verifiers to keep such information private.
+
 ##### Mitigations
 
 Node implementations should consider restricting which opcodes and storage slots validation frames can access, similar to ERC-7562. This isolates transactions from each other and limits mass invalidation vectors.
 
 It's recommended that to *validate* the transaction, a specific frame structure is enforced and the amount of gas that is expended executing the validation phase must be limited. Once the validation prefix completes, the transaction can be included in the mempool and propagated to peers safely.
 
-For deployment of the sender account in the first frame, the mempool must only allow specific and known deployer factory contracts to be used as `frame.target`, to ensure deployment is deterministic and independent of chain state.
+For deployment of the sender account in the first frame, the mempool must only allow the [EIP-7997](./eip-7997.md) deterministic factory predeploy as `frame.target`, to ensure deployment is deterministic and independent of chain state.
 
 In general, it can be assumed that handling of frame transactions imposes similar restrictions as EIP-7702 on mempool relay, i.e. only a single transaction can be pending for an account that uses frame transactions.
 
